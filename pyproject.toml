@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sotutox"
+version = "0.1.0"
+description = "Body-fitted FEniCSx compliance optimization examples inspired by sotuto."
+requires-python = ">=3.12"
+license = "LGPL-3.0-or-later"
+authors = [
+  { name = "Susanne Claus", email = "susanne.claus@onera.fr" },
+]
+dependencies = [
+  "meshio",
+  "numpy",
+  "scipy",
+  "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sotutox*"]

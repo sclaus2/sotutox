@@ -1,0 +1,12 @@
+name: sotutox
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.12
+  - fenics-dolfinx
+  - mmgsuite
+  - meshio
+  - numpy
+  - scipy
+  - matplotlib
+  - pytest
