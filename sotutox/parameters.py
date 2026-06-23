@@ -65,6 +65,7 @@ class Parameters:
     topological_min_hole_radius: float
     void_cleanup_min_hole_radius: float
     output_every: int
+    load_z: float = 0.0
 
     @property
     def mesh_size(self) -> float:
@@ -81,6 +82,6 @@ class Parameters:
 
     @property
     def target_volume(self) -> float:
-        """Target solid area for the selected domain."""
+        """Target solid measure for the selected domain."""
 
         return self.volume_target

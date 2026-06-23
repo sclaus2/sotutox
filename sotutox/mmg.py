@@ -61,12 +61,12 @@ def _facet_vertices(msh: mesh.Mesh, facets: np.ndarray) -> np.ndarray:
 def _mesh_edges(msh: mesh.Mesh) -> np.ndarray:
     """Return local mesh edges as pairs of geometry vertex indices."""
 
-    fdim = msh.topology.dim - 1
-    msh.topology.create_connectivity(fdim, 0)
-    f_to_v = msh.topology.connectivity(fdim, 0)
-    num_facets = msh.topology.index_map(fdim).size_local
+    edim = 1
+    msh.topology.create_connectivity(edim, 0)
+    e_to_v = msh.topology.connectivity(edim, 0)
+    num_edges = msh.topology.index_map(edim).size_local
     return np.asarray(
-        [f_to_v.links(facet) for facet in range(num_facets)], dtype=np.int64
+        [e_to_v.links(edge) for edge in range(num_edges)], dtype=np.int64
     )
 
 
@@ -101,7 +101,9 @@ def _phase_vertex_masks(
     return touches_solid, touches_void
 
 
-def _input_facets(msh: mesh.Mesh, facet_tags: mesh.MeshTags | None) -> tuple[np.ndarray, np.ndarray]:
+def _input_facets(
+    msh: mesh.Mesh, facet_tags: mesh.MeshTags | None
+) -> tuple[np.ndarray, np.ndarray]:
     tdim = msh.topology.dim
     fdim = tdim - 1
     msh.topology.create_connectivity(fdim, tdim)
@@ -176,7 +178,7 @@ def _phase_seed_values(
     return seeds
 
 
-def write_medit_mesh(
+def write_medit_mesh_2d(
     path: Path,
     points: np.ndarray,
     triangles: np.ndarray,
@@ -200,11 +202,38 @@ def write_medit_mesh(
         f.write("\nEnd\n")
 
 
-def write_medit_sol(path: Path, values: np.ndarray) -> None:
-    """Write a scalar P1 Medit solution file accepted by ``mmg2d -sol``."""
+def write_medit_mesh_3d(
+    path: Path,
+    points: np.ndarray,
+    tetrahedra: np.ndarray,
+    tetra_refs: np.ndarray,
+    triangles: np.ndarray,
+    triangle_refs: np.ndarray,
+) -> None:
+    """Write a linear 3D Medit mesh file accepted by MMG."""
 
     with path.open("w") as f:
-        f.write("MeshVersionFormatted 2\nDimension 2\n\n")
+        f.write("MeshVersionFormatted 2\nDimension 3\n\n")
+        f.write(f"Vertices\n{len(points)}\n")
+        for p in points:
+            f.write(f"{p[0]:.17g} {p[1]:.17g} {p[2]:.17g} 0\n")
+        f.write(f"\nTriangles\n{len(triangles)}\n")
+        for tri, ref in zip(triangles, triangle_refs):
+            f.write(f"{tri[0] + 1} {tri[1] + 1} {tri[2] + 1} {int(ref)}\n")
+        f.write(f"\nTetrahedra\n{len(tetrahedra)}\n")
+        for tet, ref in zip(tetrahedra, tetra_refs):
+            f.write(
+                f"{tet[0] + 1} {tet[1] + 1} {tet[2] + 1} {tet[3] + 1} "
+                f"{int(ref)}\n"
+            )
+        f.write("\nEnd\n")
+
+
+def write_medit_sol(path: Path, values: np.ndarray, dimension: int) -> None:
+    """Write a scalar P1 Medit solution file accepted by MMG."""
+
+    with path.open("w") as f:
+        f.write(f"MeshVersionFormatted 2\nDimension {dimension}\n\n")
         f.write(f"SolAtVertices\n{len(values)}\n1 1\n")
         for value in values:
             f.write(f"{float(value):.17g}\n")
@@ -239,7 +268,7 @@ def write_dolfinx_medit_input(
     """Write the current DOLFINx mesh and level set for ``mmg2d -ls``."""
 
     write_dolfinx_medit_mesh(msh, facet_tags, cell_tags, mesh_path)
-    write_medit_sol(sol_path, _vertex_values(phi))
+    write_medit_sol(sol_path, _vertex_values(phi), msh.topology.dim)
 
 
 def write_dolfinx_medit_mesh(
@@ -251,17 +280,35 @@ def write_dolfinx_medit_mesh(
     """Write the current DOLFINx mesh for standard ``mmg2d`` remeshing."""
 
     facets, facet_refs = _input_facets(msh, facet_tags)
-    points = msh.geometry.x[:, :2]
-    triangles = _cell_vertices(msh)
-    edges = _facet_vertices(msh, facets)
-    write_medit_mesh(
-        mesh_path,
-        points,
-        triangles,
-        _cell_refs(msh, cell_tags),
-        edges,
-        facet_refs,
-    )
+    if msh.topology.dim == 2:
+        points = msh.geometry.x[:, :2]
+        triangles = _cell_vertices(msh)
+        edges = _facet_vertices(msh, facets)
+        write_medit_mesh_2d(
+            mesh_path,
+            points,
+            triangles,
+            _cell_refs(msh, cell_tags),
+            edges,
+            facet_refs,
+        )
+        return
+
+    if msh.topology.dim == 3:
+        points = msh.geometry.x[:, :3]
+        tetrahedra = _cell_vertices(msh)
+        triangles = _facet_vertices(msh, facets)
+        write_medit_mesh_3d(
+            mesh_path,
+            points,
+            tetrahedra,
+            _cell_refs(msh, cell_tags),
+            triangles,
+            facet_refs,
+        )
+        return
+
+    raise RuntimeError("MMG remeshing is only implemented for 2D and 3D meshes.")
 
 
 def _meshio_cells(medit: meshio.Mesh, cell_type: str) -> tuple[np.ndarray, np.ndarray]:
@@ -269,38 +316,36 @@ def _meshio_cells(medit: meshio.Mesh, cell_type: str) -> tuple[np.ndarray, np.nd
         if block.type == cell_type:
             refs = np.asarray(medit.cell_data["medit:ref"][i], dtype=np.int32)
             return np.asarray(block.data, dtype=np.int64), refs
-    return np.empty((0, 2 if cell_type == "line" else 3), dtype=np.int64), np.empty(
-        0, dtype=np.int32
+    widths = {"line": 2, "triangle": 3, "tetra": 4}
+    return (
+        np.empty((0, widths[cell_type]), dtype=np.int64),
+        np.empty(0, dtype=np.int32),
     )
 
 
-def _edge_key(points: np.ndarray, edge: np.ndarray) -> tuple[tuple[float, float], tuple[float, float]]:
-    endpoints = [tuple(np.round(points[int(v), :2], 12)) for v in edge]
-    return tuple(sorted(endpoints))
-
-
-def _cell_key(
-    points: np.ndarray, cell: np.ndarray
-) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
-    vertices = [tuple(np.round(points[int(v), :2], 12)) for v in cell]
+def _entity_key(points: np.ndarray, entity: np.ndarray) -> tuple[tuple[float, ...], ...]:
+    vertices = [tuple(np.round(points[int(v)], 12)) for v in entity]
     return tuple(sorted(vertices))
 
 
-def _cell_tags_from_triangles(
-    msh: mesh.Mesh, triangles: np.ndarray, triangle_refs: np.ndarray, input_points: np.ndarray
+def _cell_tags_from_cells(
+    msh: mesh.Mesh,
+    cells_in: np.ndarray,
+    cell_refs: np.ndarray,
+    input_points: np.ndarray,
 ) -> mesh.MeshTags:
-    points = msh.geometry.x[:, :2]
+    points = msh.geometry.x[:, : msh.geometry.dim]
     by_vertices = {
-        _cell_key(input_points, triangle): int(ref)
-        for triangle, ref in zip(triangles, triangle_refs)
+        _entity_key(input_points, cell): int(ref)
+        for cell, ref in zip(cells_in, cell_refs)
     }
     cells = _cell_vertices(msh)
     entities: list[int] = []
     values: list[int] = []
     for cell, vertices in enumerate(cells):
-        key = _cell_key(points, vertices)
+        key = _entity_key(points, vertices)
         if key not in by_vertices:
-            raise RuntimeError("Could not map an MMG triangle reference to DOLFINx.")
+            raise RuntimeError("Could not map an MMG cell reference to DOLFINx.")
         entities.append(cell)
         values.append(by_vertices[key])
     return mesh.meshtags(
@@ -311,19 +356,25 @@ def _cell_tags_from_triangles(
     )
 
 
-def _facet_tags_from_lines(
-    msh: mesh.Mesh, lines: np.ndarray, line_refs: np.ndarray, input_points: np.ndarray
+def _facet_tags_from_boundary_cells(
+    msh: mesh.Mesh,
+    boundary_cells: np.ndarray,
+    boundary_refs: np.ndarray,
+    input_points: np.ndarray,
 ) -> mesh.MeshTags:
     fdim = msh.topology.dim - 1
     msh.topology.create_connectivity(fdim, 0)
     f_to_v = msh.topology.connectivity(fdim, 0)
     num_facets = msh.topology.index_map(fdim).size_local
-    points = msh.geometry.x[:, :2]
-    by_vertices = {_edge_key(points, f_to_v.links(facet)): facet for facet in range(num_facets)}
+    points = msh.geometry.x[:, : msh.geometry.dim]
+    by_vertices = {
+        _entity_key(points, f_to_v.links(facet)): facet
+        for facet in range(num_facets)
+    }
     entities: list[int] = []
     values: list[int] = []
-    for line, ref in zip(lines, line_refs):
-        key = _edge_key(input_points, line)
+    for boundary, ref in zip(boundary_cells, boundary_refs):
+        key = _entity_key(input_points, boundary)
         if key in by_vertices:
             entities.append(by_vertices[key])
             values.append(int(ref))
@@ -340,18 +391,34 @@ def read_mmg_mesh_output(mesh_path: Path, params: Parameters) -> RemeshedMesh:
     """Read a standard MMG Medit output mesh into DOLFINx mesh and tags."""
 
     medit = meshio.read(mesh_path)
+    tetrahedra, tetra_refs = _meshio_cells(medit, "tetra")
+    if len(tetrahedra) > 0:
+        triangles, triangle_refs = _meshio_cells(medit, "triangle")
+        points = np.asarray(medit.points[:, :3], dtype=np.float64)
+        domain = ufl.Mesh(
+            basix.ufl.element(
+                "Lagrange", "tetrahedron", 1, shape=(3,), dtype=np.float64
+            )
+        )
+        msh = mesh.create_mesh(MPI.COMM_WORLD, tetrahedra, domain, points)
+        cell_tags = _cell_tags_from_cells(msh, tetrahedra, tetra_refs, points)
+        facet_tags = _facet_tags_from_boundary_cells(
+            msh, triangles, triangle_refs, points
+        )
+        return RemeshedMesh(msh, cell_tags, facet_tags)
+
     triangles, triangle_refs = _meshio_cells(medit, "triangle")
     lines, line_refs = _meshio_cells(medit, "line")
     if len(triangles) == 0:
-        raise RuntimeError(f"MMG output {mesh_path} contains no triangles")
+        raise RuntimeError(f"MMG output {mesh_path} contains no cells")
 
     points = np.asarray(medit.points[:, :2], dtype=np.float64)
     domain = ufl.Mesh(
         basix.ufl.element("Lagrange", "triangle", 1, shape=(2,), dtype=np.float64)
     )
     msh = mesh.create_mesh(MPI.COMM_WORLD, triangles, domain, points)
-    cell_tags = _cell_tags_from_triangles(msh, triangles, triangle_refs, points)
-    facet_tags = _facet_tags_from_lines(msh, lines, line_refs, points)
+    cell_tags = _cell_tags_from_cells(msh, triangles, triangle_refs, points)
+    facet_tags = _facet_tags_from_boundary_cells(msh, lines, line_refs, points)
     return RemeshedMesh(msh, cell_tags, facet_tags)
 
 
@@ -364,12 +431,13 @@ def read_mmg_output(mesh_path: Path, sol_path: Path, params: Parameters) -> Reme
     V = fem.functionspace(msh, ("Lagrange", 1))
     phi = fem.Function(V, name="phi")
     values = read_medit_sol(sol_path)
-    medit_points = np.asarray(meshio.read(mesh_path).points[:, :2], dtype=np.float64)
+    gdim = msh.geometry.dim
+    medit_points = np.asarray(meshio.read(mesh_path).points[:, :gdim], dtype=np.float64)
     if len(values) != len(medit_points):
         raise RuntimeError(
             f"MMG solution {sol_path} has {len(values)} values for {len(medit_points)} vertices"
         )
-    coords = V.tabulate_dof_coordinates()[:, :2]
+    coords = V.tabulate_dof_coordinates()[:, :gdim]
     distances, point_ids = cKDTree(medit_points).query(coords)
     if np.max(distances) > 1.0e-10:
         raise RuntimeError("Could not match MMG solution vertices to DOLFINx P1 dofs.")
@@ -450,7 +518,7 @@ def run_mmg_standard(
     work_dir: Path,
     name: str,
 ) -> RemeshedMesh:
-    """Run the first standard ``mmg2d`` remesh used by ``sotuto``."""
+    """Run the first standard MMG remesh used by ``sotuto``."""
 
     work_dir.mkdir(parents=True, exist_ok=True)
     work_dir = work_dir.resolve()
@@ -499,7 +567,7 @@ def run_mmg_level_set(
     work_dir: Path,
     name: str,
 ) -> RemeshedLevelSet:
-    """Run ``mmg2d`` in level-set mode and return DOLFINx data."""
+    """Run MMG in level-set mode and return DOLFINx data."""
 
     work_dir.mkdir(parents=True, exist_ok=True)
     work_dir = work_dir.resolve()
@@ -507,7 +575,8 @@ def run_mmg_level_set(
     in_sol = work_dir / f"{name}.sol"
     out_mesh = work_dir / f"{name}.out.mesh"
     out_sol = work_dir / f"{name}.out.sol"
-    default_path = work_dir / "DEFAULT.mmg2d"
+    default_name = "DEFAULT.mmg3d" if msh.topology.dim == 3 else "DEFAULT.mmg2d"
+    default_path = work_dir / default_name
     default_path.write_text(
         f"LSBaseReferences\n1\n\n{int(params.ref_dirichlet)}\n"
     )

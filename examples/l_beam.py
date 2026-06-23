@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 ONERA
 # SPDX-License-Identifier: LGPL-3.0-or-later
-"""Run the L-beam geometry from sotuto/stress with the compliance driver."""
+"""Run the L-beam stress example from ``sotuto/stress``."""
 
 from __future__ import annotations
 
@@ -19,11 +19,21 @@ except ModuleNotFoundError:
     from examples.common import run_example
 from sotutox.mechanics import BoundaryData, facet_tags_from_groups
 from sotutox.parameters import Parameters
+from sotutox.stress import (
+    compute_stress_descent,
+    compute_stress_shape_gradients_fitted,
+    evaluate_stress_state_fitted,
+)
 
 
 L_BEAM_LOAD_Y_MIN = 0.45
 L_BEAM_LOAD_Y_MAX = 0.55
 L_BEAM_HOLE_RADIUS = 0.05
+L_BEAM_STRESS_EXCLUDED_Y = 1.8
+L_BEAM_STRESS_EXCLUDED_CENTER = (2.0, 0.5)
+L_BEAM_STRESS_EXCLUDED_RADIUS = 0.1
+L_BEAM_FIXED_RADIUS = 0.15
+L_BEAM_FIXED_PENALTY = 1.0e16
 
 L_BEAM_PARAMETERS = Parameters(
     length=2.0,
@@ -142,6 +152,33 @@ def initial_level_set_values(coords: np.ndarray) -> np.ndarray:
     return -distance
 
 
+def stress_weight(msh: mesh.Mesh) -> ufl.core.expr.Expr:
+    """Return the original ``kS`` localization from ``sotuto/stress``."""
+
+    x = ufl.SpatialCoordinate(msh)
+    circle = (
+        (x[0] - L_BEAM_STRESS_EXCLUDED_CENTER[0]) ** 2
+        + (x[1] - L_BEAM_STRESS_EXCLUDED_CENTER[1]) ** 2
+    )
+    return ufl.conditional(
+        x[1] > L_BEAM_STRESS_EXCLUDED_Y,
+        0.0,
+        ufl.conditional(circle < L_BEAM_STRESS_EXCLUDED_RADIUS**2, 0.0, 1.0),
+    )
+
+
+def regularization_mass(msh: mesh.Mesh) -> ufl.core.expr.Expr:
+    """Return ``1 + TGV*chifix`` from ``sotuto/stress/macros.idp``."""
+
+    x = ufl.SpatialCoordinate(msh)
+    circle = (
+        (x[0] - L_BEAM_STRESS_EXCLUDED_CENTER[0]) ** 2
+        + (x[1] - L_BEAM_STRESS_EXCLUDED_CENTER[1]) ** 2
+    )
+    chifix = ufl.conditional(circle < L_BEAM_FIXED_RADIUS**2, 1.0, 0.0)
+    return 1.0 + L_BEAM_FIXED_PENALTY * chifix
+
+
 def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
     """Mark the L-beam top clamp and right-edge load patch."""
 
@@ -189,6 +226,35 @@ if __name__ == "__main__":
         initial_level_set_values,
         mark_boundaries,
         Path("results_l_beam"),
-        "L-beam geometry from sotuto/stress using compliance optimization.",
+        "L-beam stress optimization from sotuto/stress.",
         create_initial_mesh=create_initial_mesh,
+        run_kwargs={
+            "evaluate_state": lambda msh, cell_tags, facet_tags, params: (
+                evaluate_stress_state_fitted(
+                    msh, cell_tags, facet_tags, params, stress_weight
+                )
+            ),
+            "compute_gradients": (
+                lambda msh, boundaries, solid_domain, solid_displacement, params: (
+                    compute_stress_shape_gradients_fitted(
+                        msh,
+                        boundaries,
+                        solid_domain,
+                        solid_displacement,
+                        params,
+                        stress_weight,
+                        regularization_mass,
+                    )
+                )
+            ),
+            "compute_descent_data": (
+                lambda gradients, state, params, max_norm: compute_stress_descent(
+                    gradients,
+                    state,
+                    params,
+                    max_norm,
+                    regularization_mass,
+                )
+            ),
+        },
     )

@@ -30,6 +30,9 @@ def _parser(
     parser.add_argument("--target-volume", type=float, default=None)
     parser.add_argument("--output-dir", type=Path, default=default_output_dir)
     parser.add_argument("--output-every", type=int, default=1)
+    parser.add_argument("--initial-left-segments", type=int, default=None)
+    parser.add_argument("--initial-bottom-segments", type=int, default=None)
+    parser.add_argument("--initial-top-segments", type=int, default=None)
     parser.add_argument("--mmg-binary", type=str, default=defaults.mmg_binary)
     parser.add_argument("--mmg-hmin", type=float, default=defaults.mmg_hmin)
     parser.add_argument("--mmg-hmax", type=float, default=defaults.mmg_hmax)
@@ -110,6 +113,8 @@ def run_example(
     default_output_dir: Path,
     description: str,
     create_initial_mesh: Callable[[Parameters], mesh.Mesh] | None = None,
+    run_kwargs: dict | None = None,
+    driver: Callable = run,
 ) -> list[dict]:
     """Run one named example using the shared optimization engine."""
 
@@ -121,6 +126,21 @@ def run_example(
             args.target_volume if args.target_volume is not None else params.volume_target
         ),
         output_every=max(1, args.output_every),
+        initial_left_segments=(
+            args.initial_left_segments
+            if args.initial_left_segments is not None
+            else params.initial_left_segments
+        ),
+        initial_bottom_segments=(
+            args.initial_bottom_segments
+            if args.initial_bottom_segments is not None
+            else params.initial_bottom_segments
+        ),
+        initial_top_segments=(
+            args.initial_top_segments
+            if args.initial_top_segments is not None
+            else params.initial_top_segments
+        ),
         mmg_binary=args.mmg_binary,
         mmg_hmin=args.mmg_hmin,
         mmg_hmax=args.mmg_hmax,
@@ -142,14 +162,14 @@ def run_example(
         topological_min_hole_radius=args.topological_min_hole_radius,
         void_cleanup_min_hole_radius=args.void_cleanup_min_hole_radius,
     )
-    run_kwargs = {}
+    configured_run_kwargs = {} if run_kwargs is None else dict(run_kwargs)
     if create_initial_mesh is not None:
-        run_kwargs["create_initial_mesh"] = create_initial_mesh
-    return run(
+        configured_run_kwargs["create_initial_mesh"] = create_initial_mesh
+    return driver(
         configured,
         args.output_dir,
         initial_level_set=initial_level_set,
         mark_boundaries=mark_boundaries,
         write_xdmf=not args.no_xdmf,
-        **run_kwargs,
+        **configured_run_kwargs,
     )

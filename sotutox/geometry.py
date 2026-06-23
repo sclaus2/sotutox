@@ -89,7 +89,7 @@ def initialize_level_set(
     """Create the initial P1 level-set from an example-supplied function."""
 
     phi = fem.Function(V, name="phi")
-    coords = V.tabulate_dof_coordinates()[:, :2]
+    coords = V.tabulate_dof_coordinates()[:, : V.mesh.geometry.dim]
     phi.x.array[:] = np.asarray(values(coords), dtype=np.float64)
     phi.x.scatter_forward()
     return phi

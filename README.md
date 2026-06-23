@@ -1,7 +1,11 @@
 # sotutox
 
-`sotutox` is a compact FEniCSx/DOLFINx port of the 2D body-fitted compliance
+`sotutox` is a compact FEniCSx/DOLFINx port of body-fitted topology
 optimization examples from [`sotuto`](https://github.com/dapogny/sotuto) of Charles Dapogny et al.
+
+The original tutorial paper is [Shape optimization using a level set based mesh
+evolution method: an overview and tutorial](https://github.com/dapogny/sotuto/blob/master)
+by G. Allaire, C. Dapogny, F. Feppon, and P. Frey, submitted in 2022.
 
 ![Body-fitted cantilever topology optimization result](assets/cantilever.png)
 
@@ -15,17 +19,20 @@ is written for every saved iteration.
 
 ## What Is Included
 
-Four examples are exposed through thin runners:
+Five examples are exposed through thin runners:
 
 - `examples/cantilever.py`: the circular-hole cantilever setup from
   `sotuto/base`.
 - `examples/bridge.py`: the MBB-style bridge setup from `sotuto/topder`,
   including periodic topological derivative hole creation.
 - `examples/l_beam.py`: the L-beam hold-all and hole pattern from
-  `sotuto/stress`, run with the current compliance/volume optimizer.
+  `sotuto/stress`, using the stress functional, adjoint, and weighted
+  regularization from the original example.
 - `examples/multiload_bridge.py`: the long perforated bridge geometry from
-  `sotuto/constraints`, run with the current single-load compliance/volume
-  optimizer.
+  `sotuto/constraints`, using the seven load cases and a native penalty update
+  for the compliance inequality constraints.
+- `examples/cantilever_3d.py`: the 3D cantilever setup from `sotuto/base3d`,
+  including spherical initial holes and `mmg3d_O3` remeshing.
 
 The reusable implementation is in `sotutox/`:
 
@@ -34,12 +41,15 @@ The reusable implementation is in `sotutox/`:
 - `sotutox/geometry.py`: rectangular hold-all mesh initialization and graph
   redistancing. Example-specific level-set formulas live in `examples/`.
 - `sotutox/redistance.py`: dependency-light graph signed-distance helper.
-- `sotutox/mmg.py`: Medit I/O and `mmg2d_O3` calls.
+- `sotutox/mmg.py`: 2D/3D Medit I/O plus `mmg2d_O3` and `mmg3d_O3` calls.
 - `sotutox/mechanics.py`: fitted solid extraction, elasticity, compliance,
   volume, and interface shape gradients.
 - `sotutox/optimization.py`: null-space descent and merit function.
 - `sotutox/topology.py`: `sotuto/topder` topological derivatives and hole
   creation.
+- `sotutox/stress.py`: `sotuto/stress` stress objective, adjoint, and weighted
+  descent helper.
+- `sotutox/constraints.py`: multi-load compliance-constraint bridge driver.
 - `sotutox/advection.py`: SUPG and characteristic level-set advection.
 - `sotutox/optimization_mmg.py`: shared MMG-remeshed optimization loop and
   writers. It receives example-specific level-set and boundary callbacks from
@@ -73,14 +83,25 @@ The reusable implementation is in `sotutox/`:
   `topological_min_hole_radius`. After accepted remeshes, the bridge also runs
   a small-void cleanup through `void_cleanup_min_hole_radius` so shrunken
   isolated holes do not persist as artifacts.
-- The `sotuto/stress` and `sotuto/constraints` geometries are available as
-  example runners, but their original optimization objectives are not yet
-  ported. `sotuto/stress` uses a stress functional and adjoint; `sotuto/constraints`
-  minimizes volume with several compliance inequality constraints. The current
-  runners reuse the compliance objective with one volume constraint.
-- `sotuto/base3d` is not ported yet. The current MMG wrapper writes and reads
-  2D triangular Medit meshes and calls `mmg2d_O3`; a faithful 3D example needs
-  tetrahedral Medit I/O, `mmg3d`, and 3D output writers.
+- The `sotuto/stress` L-beam no longer reuses the compliance objective. It
+  evaluates `sigma(u):sigma(u)` in the localized stress region, solves the
+  corresponding adjoint problem, and uses the original weighted regularization
+  around the fixed circular support.
+- The `sotuto/constraints` bridge no longer runs as a single-load
+  compliance/volume case. It solves the seven original vertical load cases and
+  minimizes volume with a quadratic penalty on compliance inequality violations.
+  This is separate from the generic one-volume-constraint null-space descent in
+  `sotutox.optimization.compute_descent`, which is still used by the standard
+  examples. The upstream `sotuto/constraints/sources/main.py` imports a Python
+  module named `nullspace_optimizer`, but that module is not present in the
+  local upstream source tree, so the constrained bridge uses a native
+  penalty-constrained update rather than a line-for-line translation of that
+  missing optimizer.
+- `sotuto/base3d` is available as `examples/cantilever_3d.py`. The initial
+  hold-all is a DOLFINx tetrahedral box rather than the original FreeFEM/TetGen
+  surface construction, but the spherical initial holes, boundary conditions,
+  3D elasticity, tetrahedral Medit I/O, `mmg3d_O3`, and 3D VTU output path are
+  implemented.
 - The SUPG UFL form is cached per mesh/function-space pair, so line-search
   trials update coefficients instead of recompiling the form each time.
 - ParaView output is written as XDMF/HDF5 plus PVD/VTU time series for both the
@@ -110,10 +131,12 @@ Check the installation:
 ```bash
 python -c "import dolfinx, meshio, scipy; print(dolfinx.__version__)"
 which mmg2d_O3
+which mmg3d_O3
 ```
 
-`mmg2d_O3` is found from the active conda environment. If it is not on `PATH`,
-pass it explicitly with `--mmg-binary /path/to/mmg2d_O3`.
+`mmg2d_O3` and `mmg3d_O3` are found from the active conda environment. If they
+are not on `PATH`, pass the binary explicitly with `--mmg-binary /path/to/mmg2d_O3`
+or `--mmg-binary /path/to/mmg3d_O3`.
 
 The example runners add the repository root to `sys.path`, so editable
 installation is not required for local runs. If you want normal package imports from notebooks or
@@ -149,6 +172,16 @@ python examples/multiload_bridge.py --iterations 10 \
   --output-dir results_multiload_bridge
 ```
 
+3D cantilever smoke run:
+
+```bash
+python examples/cantilever_3d.py --iterations 1 \
+  --mmg-binary mmg3d_O3 \
+  --initial-bottom-segments 6 --initial-left-segments 3 --initial-top-segments 3 \
+  --mmg-hmax 0.25 --mmg-hmin 0.05 \
+  --output-dir results_cantilever_3d_smoke
+```
+
 Useful switches:
 
 - `--advection supg`: default implicit Euler/SUPG transport.
@@ -164,6 +197,9 @@ Useful switches:
   whose equivalent radius is smaller than this value.
 - `--void-cleanup-min-hole-radius 0.04`: remove accepted void components whose
   equivalent radius is smaller than this value; `0` disables cleanup.
+- `--initial-left-segments`, `--initial-bottom-segments`, and
+  `--initial-top-segments`: override the example's initial mesh resolution.
+  The top-segment option is used by the 3D box depth direction.
 - `--no-xdmf`: skip ParaView files for faster tests.
 
 ## Visualize Output

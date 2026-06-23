@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 ONERA
 # SPDX-License-Identifier: LGPL-3.0-or-later
-"""Run the bridge geometry from sotuto/constraints with the compliance driver."""
+"""Run the multi-load bridge example from ``sotuto/constraints``."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ except ModuleNotFoundError:
     from examples.common import run_example
 from sotutox.mechanics import BoundaryData, facet_tags_from_groups
 from sotutox.parameters import Parameters
+from sotutox.constraints import run_multiload_constraints
 
 
 MULTILOAD_NUM_LOAD_CASES = 7
@@ -140,35 +141,45 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
 
     top_midpoints = mesh.compute_midpoints(msh, fdim, top)
     top_x = top_midpoints[:, 0]
-    in_load = np.zeros(len(top), dtype=bool)
-    for left, right in _load_intervals(params):
-        in_load |= np.logical_and(top_x >= left - eps, top_x <= right + eps)
-    loads = top[in_load]
+    load_groups: list[tuple[np.ndarray, int]] = []
+    for i, (left, right) in enumerate(_load_intervals(params)):
+        in_load = np.logical_and(top_x >= left - eps, top_x <= right + eps)
+        load_group = top[in_load]
+        if len(load_group) > 0:
+            load_groups.append((load_group, MULTILOAD_LOAD_REF + i))
 
     if len(supports) == 0:
         raise RuntimeError("No support facets found for the multiload bridge.")
-    if len(loads) == 0:
+    if len(load_groups) != MULTILOAD_NUM_LOAD_CASES:
         raise RuntimeError("No load facets found for the multiload bridge.")
 
     return BoundaryData(
         left_facets=supports.astype(np.int32),
-        load_facets=loads.astype(np.int32),
+        load_facets=np.concatenate([group for group, _ in load_groups]).astype(
+            np.int32
+        ),
         facet_tags=facet_tags_from_groups(
             msh,
             fdim,
-            [
-                (supports, params.ref_dirichlet),
-                (loads, params.ref_neumann),
-            ],
+            [(supports, params.ref_dirichlet), *load_groups],
         ),
     )
 
 
 if __name__ == "__main__":
+    load_refs = [MULTILOAD_LOAD_REF + i for i in range(MULTILOAD_NUM_LOAD_CASES)]
+    loads = [(0.0, -1.0) for _ in range(MULTILOAD_NUM_LOAD_CASES)]
     run_example(
         MULTILOAD_BRIDGE_PARAMETERS,
         initial_level_set_values,
         mark_boundaries,
         Path("results_multiload_bridge"),
-        "Bridge geometry from sotuto/constraints using compliance optimization.",
+        "Multi-load constrained bridge optimization from sotuto/constraints.",
+        driver=run_multiload_constraints,
+        run_kwargs={
+            "load_refs": load_refs,
+            "loads": loads,
+            "compliance_threshold_factor": 0.9,
+            "constraint_penalty": 2.0,
+        },
     )

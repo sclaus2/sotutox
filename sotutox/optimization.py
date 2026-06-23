@@ -8,6 +8,7 @@ and collaborators.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -54,12 +55,30 @@ def compute_descent(
 ) -> DescentData:
     """Reproduce the null-space constrained descent from ``descent.edp``."""
 
+    return compute_descent_with_inner(
+        gradients,
+        state,
+        params,
+        max_norm_xi_objective,
+        lambda f, g: regularized_inner(f, g, params),
+    )
+
+
+def compute_descent_with_inner(
+    gradients: Gradients,
+    state: State,
+    params: Parameters,
+    max_norm_xi_objective: float,
+    inner: Callable[[fem.Function, fem.Function], float],
+) -> DescentData:
+    """Compute the null-space descent using an example-specific inner product."""
+
     V = gradients.compliance.function_space
-    m = regularized_inner(gradients.volume, gradients.volume, params)
+    m = inner(gradients.volume, gradients.volume)
     if abs(m) < params.eps:
         raise RuntimeError("Volume gradient has near-zero regularized norm.")
 
-    lagrange = regularized_inner(gradients.compliance, gradients.volume, params) / m
+    lagrange = inner(gradients.compliance, gradients.volume) / m
     xi_objective = _linear_combination(
         V,
         [(1.0, gradients.compliance), (-lagrange, gradients.volume)],

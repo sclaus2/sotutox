@@ -169,6 +169,9 @@ def solve_elasticity_solid(
     msh: mesh.Mesh,
     boundaries: BoundaryData,
     params: Parameters,
+    *,
+    load_ref: int | None = None,
+    load: np.ndarray | None = None,
 ) -> fem.Function:
     """Solve linear elasticity on the fitted solid mesh."""
 
@@ -178,18 +181,34 @@ def solve_elasticity_solid(
     dx = ufl.dx(domain=msh)
     ds = ufl.Measure("ds", domain=msh, subdomain_data=boundaries.facet_tags)
 
-    traction = fem.Constant(
-        msh, default_scalar_type((params.load_x, params.load_y))
+    load_values = (
+        np.asarray(
+            [params.load_x, params.load_y, params.load_z],
+            dtype=default_scalar_type,
+        )
+        if load is None
+        else np.asarray(load, dtype=default_scalar_type)
     )
+    if len(load_values) < msh.geometry.dim:
+        load_vector = np.zeros(msh.geometry.dim, dtype=default_scalar_type)
+        load_vector[: len(load_values)] = load_values
+    else:
+        load_vector = load_values[: msh.geometry.dim]
+    traction = fem.Constant(msh, load_vector)
     a = ufl.inner(sigma(u, params), epsilon(v)) * dx
-    L = ufl.dot(traction, v) * ds(params.ref_neumann)
+    L = ufl.dot(traction, v) * ds(params.ref_neumann if load_ref is None else load_ref)
 
+    petsc_options = (
+        {"ksp_type": "cg", "pc_type": "gamg", "ksp_rtol": 1.0e-8}
+        if msh.topology.dim == 3
+        else {"ksp_type": "preonly", "pc_type": "lu"}
+    )
     problem = petsc.LinearProblem(
         a,
         L,
         bcs=_elasticity_bcs(V, boundaries),
         petsc_options_prefix="sotutox_solid_elasticity_",
-        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        petsc_options=petsc_options,
     )
     uh = problem.solve()
     uh.name = "solid_displacement"
@@ -308,6 +327,7 @@ def solve_regularized_scalar_form(
     params: Parameters,
     name: str,
     entity_maps: list[mesh.EntityMap] | None = None,
+    mass_weight: ufl.core.expr.Expr | float = 1.0,
 ) -> fem.Function:
     """Solve ``(alpha^2 grad g, grad v) + (g, v) = rhs`` for a linear form."""
 
@@ -316,7 +336,7 @@ def solve_regularized_scalar_form(
     dx = ufl.dx(domain=V.mesh)
     a = (
         params.regularization**2 * ufl.dot(ufl.grad(g), ufl.grad(v))
-        + g * v
+        + mass_weight * g * v
     ) * dx
     problem = petsc.LinearProblem(
         a,
@@ -368,12 +388,16 @@ def compute_shape_gradients_fitted(
 
 
 def regularized_inner(
-    f: fem.Function, g: fem.Function, params: Parameters
+    f: fem.Function,
+    g: fem.Function,
+    params: Parameters,
+    mass_weight: ufl.core.expr.Expr | float = 1.0,
 ) -> float:
     """H1 inner product used by sotuto's descent script."""
 
     dx = ufl.dx(domain=f.function_space.mesh)
     form = (
-        params.regularization**2 * ufl.dot(ufl.grad(f), ufl.grad(g)) + f * g
+        params.regularization**2 * ufl.dot(ufl.grad(f), ufl.grad(g))
+        + mass_weight * f * g
     ) * dx
     return _assemble_scalar(form, f.function_space.mesh.comm)

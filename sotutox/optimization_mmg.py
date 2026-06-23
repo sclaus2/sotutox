@@ -40,6 +40,7 @@ from .mmg import (
     run_mmg_standard,
 )
 from .optimization import compute_descent, merit
+from .optimization import DescentData
 from .parameters import Parameters
 from .topology import (
     create_topological_hole_level_set,
@@ -201,11 +202,13 @@ def _write_parent_vtu(
     gradients: Gradients | None = None,
     velocity: fem.Function | None = None,
 ) -> None:
-    triangles = _cell_vertices(step.mesh)
+    cells = _cell_vertices(step.mesh)
     facets, facet_refs = _line_tag_values(step.facet_tags)
-    lines = _facet_vertices(step.mesh, facets)
-    num_lines = len(lines)
-    num_cells = len(triangles)
+    facet_cells = _facet_vertices(step.mesh, facets)
+    cell_type = "tetra" if step.mesh.topology.dim == 3 else "triangle"
+    facet_type = "triangle" if step.mesh.topology.dim == 3 else "line"
+    num_facets = len(facet_cells)
+    num_cells = len(cells)
 
     point_data = {
         "phi": _vertex_values(step.phi),
@@ -220,7 +223,7 @@ def _write_parent_vtu(
     cell_data = {
         "cell_reference": [
             _cell_tag_values(step.mesh, step.cell_tags),
-            np.zeros(num_lines),
+            np.zeros(num_facets),
         ],
         "facet_reference": [
             np.zeros(num_cells),
@@ -228,14 +231,14 @@ def _write_parent_vtu(
         ],
         "solid_indicator": [
             _dg0_cell_values(solid),
-            np.zeros(num_lines),
+            np.zeros(num_facets),
         ],
     }
     meshio.write(
         path,
         meshio.Mesh(
             _points3(step.mesh),
-            [("triangle", triangles), ("line", lines)],
+            [(cell_type, cells), (facet_type, facet_cells)],
             point_data=point_data,
             cell_data=cell_data,
         ),
@@ -245,17 +248,19 @@ def _write_parent_vtu(
 def _write_solid_vtu(
     path: Path, solid_domain: SolidSubmesh, solid_displacement: fem.Function
 ) -> None:
-    triangles = _cell_vertices(solid_domain.mesh)
+    cells = _cell_vertices(solid_domain.mesh)
     facets, facet_refs = _line_tag_values(solid_domain.facet_tags)
-    lines = _facet_vertices(solid_domain.mesh, facets)
-    num_cells = len(triangles)
-    num_lines = len(lines)
+    facet_cells = _facet_vertices(solid_domain.mesh, facets)
+    cell_type = "tetra" if solid_domain.mesh.topology.dim == 3 else "triangle"
+    facet_type = "triangle" if solid_domain.mesh.topology.dim == 3 else "line"
+    num_cells = len(cells)
+    num_facets = len(facet_cells)
 
     meshio.write(
         path,
         meshio.Mesh(
             _points3(solid_domain.mesh),
-            [("triangle", triangles), ("line", lines)],
+            [(cell_type, cells), (facet_type, facet_cells)],
             point_data={"solid_displacement": _vertex_values(solid_displacement)},
             cell_data={
                 "solid_facet_reference": [
@@ -264,7 +269,7 @@ def _write_solid_vtu(
                 ],
                 "solid_cell": [
                     np.ones(num_cells),
-                    np.zeros(num_lines),
+                    np.zeros(num_facets),
                 ],
             },
         ),
@@ -547,6 +552,15 @@ def _cleanup_small_void_components(
 InitialLevelSet = Callable[[np.ndarray], np.ndarray]
 BoundaryMarker = Callable[[mesh.Mesh, Parameters], BoundaryData]
 InitialMeshFactory = Callable[[Parameters], mesh.Mesh]
+StateEvaluator = Callable[
+    [mesh.Mesh, mesh.MeshTags, mesh.MeshTags, Parameters],
+    tuple[object, fem.Function, SolidSubmesh, fem.Function],
+]
+GradientEvaluator = Callable[
+    [mesh.Mesh, BoundaryData, SolidSubmesh, fem.Function, Parameters],
+    Gradients,
+]
+DescentEvaluator = Callable[[Gradients, object, Parameters, float], DescentData]
 
 
 def run(
@@ -556,6 +570,9 @@ def run(
     initial_level_set: InitialLevelSet,
     mark_boundaries: BoundaryMarker,
     create_initial_mesh: InitialMeshFactory = create_initial_rectangle_mesh,
+    evaluate_state: StateEvaluator = evaluate_state_fitted,
+    compute_gradients: GradientEvaluator = compute_shape_gradients_fitted,
+    compute_descent_data: DescentEvaluator = compute_descent,
     write_xdmf: bool = True,
 ) -> list[dict]:
     """Run the generic MMG-remeshed fitted-domain optimization loop."""
@@ -596,7 +613,7 @@ def run(
             current.phi, current.cell_tags, current.facet_tags, params
         )
         boundaries = boundary_data_from_tags(current.facet_tags, params)
-        state, solid, solid_domain, solid_displacement = evaluate_state_fitted(
+        state, solid, solid_domain, solid_displacement = evaluate_state(
             current.mesh, current.cell_tags, current.facet_tags, params
         )
 
@@ -631,14 +648,16 @@ def run(
                 )
             break
 
-        gradients = compute_shape_gradients_fitted(
+        gradients = compute_gradients(
             current.mesh,
             boundaries,
             solid_domain,
             solid_displacement,
             params,
         )
-        descent = compute_descent(gradients, state, params, max_norm_xi_objective)
+        descent = compute_descent_data(
+            gradients, state, params, max_norm_xi_objective
+        )
         velocity = normal_velocity_from_speed(current.phi, descent.speed, params)
         if iteration == params.normalization_update_iteration:
             max_norm_xi_objective = descent.norm_xi_objective
@@ -710,7 +729,7 @@ def run(
                 distance_level_set_from_tags(
                     trial.phi, trial.cell_tags, trial.facet_tags, params
                 )
-                trial_state, _, _, _ = evaluate_state_fitted(
+                trial_state, _, _, _ = evaluate_state(
                     trial.mesh, trial.cell_tags, trial.facet_tags, params
                 )
                 trial_merit = merit(trial_state, descent, params)
@@ -806,7 +825,7 @@ def run(
                 trial.phi, trial.cell_tags, trial.facet_tags, params
             )
             try:
-                trial_state, _, _, _ = evaluate_state_fitted(
+                trial_state, _, _, _ = evaluate_state(
                     trial.mesh, trial.cell_tags, trial.facet_tags, params
                 )
             except RuntimeError as exc:
