@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import heapq
-
 import numpy as np
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra
 
 
 def graph_signed_distance(
@@ -20,7 +20,8 @@ def graph_signed_distance(
 
     The front is initialized at all exact zero vertices and at linearly
     interpolated zero crossings on sign-changing mesh edges. Distances are then
-    propagated with Dijkstra's algorithm over the mesh edge graph.
+    propagated with Dijkstra's algorithm over the mesh edge graph (SciPy's, from
+    a virtual source joined to every seeded vertex by its start distance).
     """
 
     points = np.asarray(points, dtype=np.float64)
@@ -33,47 +34,30 @@ def graph_signed_distance(
     if values.shape != (points.shape[0],):
         raise ValueError("values must have one scalar per point.")
 
-    distances = np.full(points.shape[0], np.inf, dtype=np.float64)
-    adjacency: list[list[tuple[int, float]]] = [[] for _ in range(points.shape[0])]
+    n = points.shape[0]
+    distances = np.full(n, np.inf, dtype=np.float64)
+    i, j = edges[:, 0], edges[:, 1]
+    length = np.linalg.norm(points[i] - points[j], axis=1)
+    keep = length > 0.0
+    i, j, length = i[keep], j[keep], length[keep]
 
-    for i_raw, j_raw in edges:
-        i = int(i_raw)
-        j = int(j_raw)
-        length = float(np.linalg.norm(points[i] - points[j]))
-        if length <= 0.0:
-            continue
-        adjacency[i].append((j, length))
-        adjacency[j].append((i, length))
+    vi, vj = values[i], values[j]
+    abs_i, abs_j = np.abs(vi), np.abs(vj)
+    distances[i[abs_i <= zero_tol]] = 0.0
+    distances[j[abs_j <= zero_tol]] = 0.0
+    denom = abs_i + abs_j
+    crossing = (vi * vj < 0.0) & (denom > zero_tol)
+    np.minimum.at(distances, i[crossing], length[crossing] * abs_i[crossing] / denom[crossing])
+    np.minimum.at(distances, j[crossing], length[crossing] * abs_j[crossing] / denom[crossing])
 
-        vi = values[i]
-        vj = values[j]
-        abs_i = abs(vi)
-        abs_j = abs(vj)
-        if abs_i <= zero_tol:
-            distances[i] = 0.0
-        if abs_j <= zero_tol:
-            distances[j] = 0.0
-        if vi * vj < 0.0:
-            denom = abs_i + abs_j
-            if denom > zero_tol:
-                distances[i] = min(distances[i], length * abs_i / denom)
-                distances[j] = min(distances[j], length * abs_j / denom)
-
-    queue: list[tuple[float, int]] = [
-        (float(distance), vertex)
-        for vertex, distance in enumerate(distances)
-        if np.isfinite(distance)
-    ]
-    heapq.heapify(queue)
-    while queue:
-        distance, vertex = heapq.heappop(queue)
-        if distance != distances[vertex]:
-            continue
-        for neighbor, weight in adjacency[vertex]:
-            trial = distance + weight
-            if trial < distances[neighbor]:
-                distances[neighbor] = trial
-                heapq.heappush(queue, (trial, neighbor))
+    # Dijkstra over the edge graph from a virtual source (vertex n) joined to every seeded vertex by its start distance
+    seeds = np.flatnonzero(np.isfinite(distances))
+    if len(seeds) > 0:
+        rows = np.concatenate([i, j, np.full(len(seeds), n, dtype=np.int64)])
+        cols = np.concatenate([j, i, seeds])
+        weights = np.concatenate([length, length, distances[seeds]])
+        graph = coo_matrix((weights, (rows, cols)), shape=(n + 1, n + 1)).tocsr()
+        distances = dijkstra(graph, directed=True, indices=n)[:n]
 
     fallback = np.abs(values)
     distances = np.where(np.isfinite(distances), distances, fallback)

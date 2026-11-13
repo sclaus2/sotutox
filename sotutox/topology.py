@@ -15,6 +15,7 @@ from scipy.spatial import cKDTree
 
 from .mechanics import SolidSubmesh, State, elastic_energy_density
 from .optimization import DescentData
+from . import solvers
 from .parameters import Parameters
 
 
@@ -103,7 +104,7 @@ def topological_compliance_derivative(
         g * v * dx,
         derivative_density * v * dx,
         petsc_options_prefix="sotutox_topological_compliance_",
-        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        petsc_options=solvers.options("mass", solid_mesh),
     )
     on_solid = problem.solve()
     on_solid.name = "topological_compliance"

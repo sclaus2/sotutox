@@ -16,6 +16,7 @@ from dolfinx import fem, geometry, mesh
 from dolfinx.fem import petsc
 from scipy.spatial import cKDTree
 
+from . import solvers
 from .parameters import Parameters
 
 
@@ -98,7 +99,7 @@ def normal_velocity_from_speed(
         ufl.inner(normal_trial, test) * dx,
         ufl.inner(raw_normal, test) * dx,
         petsc_options_prefix="sotutox_normal_velocity_",
-        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        petsc_options=solvers.options("mass", msh),
     )
     projected_normal = problem.solve()
     normal_values = projected_normal.x.array.reshape((-1, W.dofmap.bs))[:, :gdim]
@@ -198,7 +199,7 @@ class SUPGAdvector:
             L,
             u=self.result,
             petsc_options_prefix=f"sotutox_supg_advection_{id(self):x}_",
-            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            petsc_options=solvers.options("transport", msh),
         )
 
     def solve(

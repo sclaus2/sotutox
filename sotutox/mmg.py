@@ -65,9 +65,9 @@ def _mesh_edges(msh: mesh.Mesh) -> np.ndarray:
     msh.topology.create_connectivity(edim, 0)
     e_to_v = msh.topology.connectivity(edim, 0)
     num_edges = msh.topology.index_map(edim).size_local
-    return np.asarray(
-        [e_to_v.links(edge) for edge in range(num_edges)], dtype=np.int64
-    )
+    first = np.asarray(e_to_v.offsets[:num_edges], dtype=np.int64)
+    links = np.asarray(e_to_v.array, dtype=np.int64)
+    return np.stack([links[first], links[first + 1]], axis=1)
 
 
 def _tag_dict(tags: mesh.MeshTags | None) -> dict[int, int]:

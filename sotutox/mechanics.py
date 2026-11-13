@@ -16,6 +16,7 @@ from dolfinx import default_scalar_type, fem, mesh
 from dolfinx.fem import petsc
 from mpi4py import MPI
 
+from . import solvers
 from .parameters import Parameters
 
 
@@ -198,19 +199,14 @@ def solve_elasticity_solid(
     a = ufl.inner(sigma(u, params), epsilon(v)) * dx
     L = ufl.dot(traction, v) * ds(params.ref_neumann if load_ref is None else load_ref)
 
-    petsc_options = (
-        {"ksp_type": "cg", "pc_type": "gamg", "ksp_rtol": 1.0e-8}
-        if msh.topology.dim == 3
-        else {"ksp_type": "preonly", "pc_type": "lu"}
-    )
     problem = petsc.LinearProblem(
         a,
         L,
         bcs=_elasticity_bcs(V, boundaries),
         petsc_options_prefix="sotutox_solid_elasticity_",
-        petsc_options=petsc_options,
+        petsc_options=solvers.options("elasticity", msh),
     )
-    uh = problem.solve()
+    uh = solvers.solve_elasticity(problem, V)
     uh.name = "solid_displacement"
     uh.x.scatter_forward()
     return uh
@@ -343,7 +339,7 @@ def solve_regularized_scalar_form(
         rhs_form,
         bcs=[_zero_on_load_bc(V, boundaries)],
         petsc_options_prefix=f"sotutox_{name}_",
-        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        petsc_options=solvers.options("elliptic", V.mesh),
         entity_maps=entity_maps,
     )
     result = problem.solve()

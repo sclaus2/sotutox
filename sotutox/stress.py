@@ -28,6 +28,7 @@ from .mechanics import (
     vector_space,
 )
 from .optimization import DescentData, compute_descent_with_inner
+from . import solvers
 from .parameters import Parameters
 
 WeightFactory = Callable[[mesh.Mesh], ufl.core.expr.Expr]
@@ -64,9 +65,9 @@ def solve_stress_adjoint(
         L,
         bcs=_elasticity_bcs(V, solid_domain.boundaries),
         petsc_options_prefix="sotutox_stress_adjoint_",
-        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        petsc_options=solvers.options("elasticity", msh),
     )
-    adjoint = problem.solve()
+    adjoint = solvers.solve_elasticity(problem, V)
     adjoint.name = "solid_stress_adjoint"
     adjoint.x.scatter_forward()
     return adjoint
