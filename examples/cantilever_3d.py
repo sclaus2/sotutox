@@ -206,6 +206,26 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
     )
 
 
+def shapeforest_settings(params: Parameters) -> dict:
+    """``--remesher shapeforest``: the clamp x = 0, the load patch on x = 2 -- the square [0.4, 0.6]^2 that the first mesh's
+    facets give the load disc, as mmg3d keeps it -- and solid parts must reach the clamp (mmg3d's -rmc). The sizes are
+    those of the runs that reached mmg3d's design: h 0.07, tol h / 4, h_min 0.04, P1+G, the floor 0.5 h_min."""
+    import shapeforest as sf
+
+    load = sf.box(size=(0.5, 0.2, 0.2), center=(2.0, 0.5, 0.5), name="load")
+    clamp = sf.box(size=(2.0, 3.0, 3.0), center=(-1.0 + 1e-7, 0.5, 0.5), name="clamp")
+    return dict(
+        patches=[(load, params.ref_neumann), (clamp, params.ref_dirichlet)],
+        anchors={0: "clamp"},
+        min_part=2e-5,
+        h=params.mmg_hmax,
+        tol=0.25 * params.mmg_hmax,
+        h_min=params.mmg_hmin,
+        representation="p1g",
+        cross_floor=0.5,
+    )
+
+
 if __name__ == "__main__":
     run_example(
         CANTILEVER_3D_PARAMETERS,
@@ -214,5 +234,6 @@ if __name__ == "__main__":
         Path("results_cantilever_3d"),
         "3D cantilever compliance optimization from sotuto/base3d.",
         create_initial_mesh=create_initial_mesh,
+        shapeforest_settings=shapeforest_settings,
     )
 

@@ -39,6 +39,34 @@ def _parser(
     parser.add_argument("--mmg-hausd", type=float, default=defaults.mmg_hausd)
     parser.add_argument("--mmg-hgrad", type=float, default=defaults.mmg_hgrad)
     parser.add_argument(
+        "--remesher",
+        choices=("mmg", "shapeforest"),
+        default="mmg",
+        help="The remesher: mmg (Medit files) or ShapeForest's conform (sotutox.shapeforest; the example's "
+        "shapeforest_settings give its patches and sizes, the --sf-* options override them).",
+    )
+    parser.add_argument("--sf-h", type=float, default=None, help="ShapeForest: the mesh size h.")
+    parser.add_argument("--sf-tol", type=float, default=None, help="ShapeForest: the interface's tolerance.")
+    parser.add_argument("--sf-h-min", type=float, default=None, help="ShapeForest: h_min.")
+    parser.add_argument(
+        "--sf-level-set",
+        choices=("p1", "p1g"),
+        default=None,
+        help="ShapeForest: phi's P1 values, or with G (the lumped projection of their gradient) a Hermite level set.",
+    )
+    parser.add_argument(
+        "--sf-cross-floor",
+        type=float,
+        default=None,
+        help="ShapeForest, 3D: no_cross_edges' floor x h_min (walls thinner than it hold no vertex).",
+    )
+    parser.add_argument(
+        "--sf-start",
+        choices=("mmg", "initial"),
+        default=None,
+        help="ShapeForest: the first mesh, mmg's remesh of the initial mesh or the initial mesh as it is.",
+    )
+    parser.add_argument(
         "--advection",
         choices=("supg", "midpoint", "euler"),
         default=defaults.advection_backend,
@@ -106,6 +134,35 @@ def _parser(
     return parser
 
 
+def _shapeforest_remesher(args, params: Parameters, settings: Callable[[Parameters], dict] | None):
+    """The example's ShapeForest remesher, its settings overridden by the --sf-* options."""
+    if settings is None:
+        raise ValueError(
+            "--remesher shapeforest: this example defines no shapeforest_settings (its patches); valid: --remesher mmg"
+        )
+    try:
+        from sotutox.shapeforest import ShapeForestRemesher
+    except ImportError as error:
+        raise ImportError(
+            f"--remesher shapeforest needs ShapeForest (with its compiled mesher) on the path: {error}"
+        ) from error
+    kw = dict(settings(params))
+    for option, key in (
+        ("sf_h", "h"),
+        ("sf_tol", "tol"),
+        ("sf_h_min", "h_min"),
+        ("sf_level_set", "representation"),
+        ("sf_cross_floor", "cross_floor"),
+        ("sf_start", "start"),
+    ):
+        if getattr(args, option) is not None:
+            kw[key] = getattr(args, option)
+    if args.sf_h is not None and args.sf_tol is None:
+        kw["tol"] = 0.25 * args.sf_h
+    kw.setdefault("failures", args.output_dir / "failures")
+    return ShapeForestRemesher(**kw)
+
+
 def run_example(
     params: Parameters,
     initial_level_set: Callable[[np.ndarray], np.ndarray],
@@ -115,8 +172,10 @@ def run_example(
     create_initial_mesh: Callable[[Parameters], mesh.Mesh] | None = None,
     run_kwargs: dict | None = None,
     driver: Callable = run,
+    shapeforest_settings: Callable[[Parameters], dict] | None = None,
 ) -> list[dict]:
-    """Run one named example using the shared optimization engine."""
+    """Run one named example using the shared optimization engine. ``shapeforest_settings``: the example's
+    ``ShapeForestRemesher`` settings (patches, sizes) for ``--remesher shapeforest``."""
 
     args = _parser(description, default_output_dir, params).parse_args()
     configured = replace(
@@ -165,6 +224,8 @@ def run_example(
     configured_run_kwargs = {} if run_kwargs is None else dict(run_kwargs)
     if create_initial_mesh is not None:
         configured_run_kwargs["create_initial_mesh"] = create_initial_mesh
+    if args.remesher == "shapeforest":
+        configured_run_kwargs["remesher"] = _shapeforest_remesher(args, configured, shapeforest_settings)
     return driver(
         configured,
         args.output_dir,

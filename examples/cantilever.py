@@ -132,6 +132,29 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
     )
 
 
+def shapeforest_settings(params: Parameters) -> dict:
+    """``--remesher shapeforest``: the clamp x = 0, the load segment on x = 2, and solid parts must reach the clamp
+    (mmg2d's -rmc). The sizes of the 2D ShapeForest runs: h 0.02, tol h / 4, h_min h / 4, snap 0.01."""
+    import shapeforest as sf
+
+    load = sf.rectangle(
+        size=(0.2, CANTILEVER_LOAD_Y_MAX - CANTILEVER_LOAD_Y_MIN),
+        center=(2.0, 0.5 * (CANTILEVER_LOAD_Y_MIN + CANTILEVER_LOAD_Y_MAX)),
+        name="load",
+    )
+    clamp = sf.rectangle(size=(2.0, 3.0), center=(-1.0 + 1e-7, 0.5), name="clamp")
+    return dict(
+        patches=[(load, params.ref_neumann), (clamp, params.ref_dirichlet)],
+        anchors={0: "clamp"},
+        min_part=2e-5,
+        h=params.mmg_hmax,
+        tol=0.25 * params.mmg_hmax,
+        h_min=0.25 * params.mmg_hmax,
+        snap=0.01,
+        representation="p1g",
+    )
+
+
 if __name__ == "__main__":
     run_example(
         CANTILEVER_PARAMETERS,
@@ -139,4 +162,5 @@ if __name__ == "__main__":
         mark_boundaries,
         Path("results_cantilever"),
         "Circular-hole cantilever compliance optimization.",
+        shapeforest_settings=shapeforest_settings,
     )

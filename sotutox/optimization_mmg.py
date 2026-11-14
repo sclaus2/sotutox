@@ -508,11 +508,24 @@ def _remove_void_cells_from_level_set(
     return cleaned
 
 
+class MmgRemesher:
+    """The loop's default remesher: mmg2d / mmg3d through Medit files (``sotutox.mmg``). Its calls look the module's
+    ``run_mmg_standard`` and ``run_mmg_level_set`` up when they run, so code that replaces those still takes effect. Any
+    object with the same two methods can replace it (``run(..., remesher=...)``; ``sotutox.shapeforest``)."""
+
+    def standard(self, msh, facet_tags, cell_tags, params, work_dir, name):
+        return run_mmg_standard(msh, facet_tags, cell_tags, params, work_dir, name)
+
+    def level_set(self, msh, phi, facet_tags, cell_tags, params, work_dir, name):
+        return run_mmg_level_set(msh, phi, facet_tags, cell_tags, params, work_dir, name)
+
+
 def _cleanup_small_void_components(
     step: RemeshedLevelSet,
     params: Parameters,
     mmg_dir: Path,
     name: str,
+    remesher=None,
 ) -> RemeshedLevelSet:
     removed_cells, removed_areas = _small_void_component_cells(step, params)
     if len(removed_cells) == 0:
@@ -534,7 +547,8 @@ def _cleanup_small_void_components(
         f"area=[{area_preview}]"
     )
 
-    cleaned = run_mmg_level_set(
+    remesher = remesher if remesher is not None else MmgRemesher()
+    cleaned = remesher.level_set(
         step.mesh,
         cleaned_phi,
         cleaned_facets,
@@ -574,15 +588,19 @@ def run(
     compute_gradients: GradientEvaluator = compute_shape_gradients_fitted,
     compute_descent_data: DescentEvaluator = compute_descent,
     write_xdmf: bool = True,
+    remesher=None,
 ) -> list[dict]:
-    """Run the generic MMG-remeshed fitted-domain optimization loop."""
+    """Run the generic MMG-remeshed fitted-domain optimization loop. ``remesher``: an object with ``standard`` and
+    ``level_set`` remesh calls (:class:`MmgRemesher`, the default; ``sotutox.shapeforest.ShapeForestRemesher``)."""
+
+    remesher = remesher if remesher is not None else MmgRemesher()
 
     output_dir.mkdir(parents=True, exist_ok=True)
     mmg_dir = output_dir / "mmg"
 
     initial_mesh = create_initial_mesh(params)
     initial_boundaries = mark_boundaries(initial_mesh, params)
-    background = run_mmg_standard(
+    background = remesher.standard(
         initial_mesh,
         initial_boundaries.facet_tags,
         None,
@@ -592,7 +610,7 @@ def run(
     )
     V0 = scalar_space(background.mesh)
     phi0 = initialize_level_set(V0, initial_level_set)
-    current = run_mmg_level_set(
+    current = remesher.level_set(
         background.mesh,
         phi0,
         background.facet_tags,
@@ -714,7 +732,7 @@ def run(
             trial_merit = current_merit
             trial_state = state
             try:
-                trial = run_mmg_level_set(
+                trial = remesher.level_set(
                     current.mesh,
                     raw_trial_phi,
                     current.facet_tags,
@@ -724,7 +742,7 @@ def run(
                     f"it{iteration:04d}_topology",
                 )
                 trial = _cleanup_small_void_components(
-                    trial, params, mmg_dir, f"it{iteration:04d}_topology"
+                    trial, params, mmg_dir, f"it{iteration:04d}_topology", remesher
                 )
                 distance_level_set_from_tags(
                     trial.phi, trial.cell_tags, trial.facet_tags, params
@@ -799,7 +817,7 @@ def run(
                 params,
             )
             try:
-                trial = run_mmg_level_set(
+                trial = remesher.level_set(
                     current.mesh,
                     raw_trial_phi,
                     current.facet_tags,
@@ -809,7 +827,7 @@ def run(
                     f"it{iteration:04d}_ls{k}",
                 )
                 trial = _cleanup_small_void_components(
-                    trial, params, mmg_dir, f"it{iteration:04d}_ls{k}"
+                    trial, params, mmg_dir, f"it{iteration:04d}_ls{k}", remesher
                 )
             except RuntimeError as exc:
                 print(
