@@ -148,7 +148,7 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
         if len(load_group) > 0:
             load_groups.append((load_group, MULTILOAD_LOAD_REF + i))
 
-    if len(supports) == 0:
+    if msh.comm.allreduce(len(supports)) == 0:
         raise RuntimeError("No support facets found for the multiload bridge.")
     if len(load_groups) != MULTILOAD_NUM_LOAD_CASES:
         raise RuntimeError("No load facets found for the multiload bridge.")

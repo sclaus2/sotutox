@@ -62,12 +62,13 @@ class SolidSubmesh:
 
 
 def _cell_refs(msh: mesh.Mesh, cell_tags: mesh.MeshTags | None) -> np.ndarray:
+    """The owned cells' references (the submesh takes owned cells; on MPI ranks the tags may hold ghosts too)."""
     num_cells = msh.topology.index_map(msh.topology.dim).size_local
     refs = np.ones(num_cells, dtype=np.int32)
     if cell_tags is not None:
-        refs[np.asarray(cell_tags.indices, dtype=np.int32)] = np.asarray(
-            cell_tags.values, dtype=np.int32
-        )
+        indices = np.asarray(cell_tags.indices, dtype=np.int32)
+        own = indices < num_cells
+        refs[indices[own]] = np.asarray(cell_tags.values, dtype=np.int32)[own]
     return refs
 
 
@@ -80,8 +81,11 @@ def facet_tags_from_groups(
     msh: mesh.Mesh, fdim: int, groups: list[tuple[np.ndarray, int]]
 ) -> mesh.MeshTags:
     groups = [(group, value) for group, value in groups if len(group) > 0]
-    if not groups:
+    # on MPI ranks a rank may hold none of the groups' facets: only no facet on any rank is an error
+    if msh.comm.allreduce(len(groups)) == 0:
         raise ValueError("At least one facet group is required.")
+    if not groups:
+        return mesh.meshtags(msh, fdim, np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32))
     facets = np.concatenate([group for group, _ in groups]).astype(np.int32)
     values = np.concatenate(
         [np.full(len(group), value, dtype=np.int32) for group, value in groups]
@@ -98,15 +102,15 @@ def boundary_data_from_tags(facet_tags: mesh.MeshTags, params: Parameters) -> Bo
     left = indices[values == params.ref_dirichlet]
     load = indices[values == params.ref_neumann]
     roller = indices[values == params.ref_dirichlet_roller]
-    if len(left) == 0:
+    if facet_tags.topology.comm.allreduce(len(left)) == 0:
         raise RuntimeError(
             f"MMG mesh has no Dirichlet facets with reference {params.ref_dirichlet}."
         )
-    if len(load) == 0:
+    if facet_tags.topology.comm.allreduce(len(load)) == 0:
         raise RuntimeError(
             f"MMG mesh has no Neumann/load facets with reference {params.ref_neumann}."
         )
-    if params.roller_support_required and len(roller) == 0:
+    if params.roller_support_required and facet_tags.topology.comm.allreduce(len(roller)) == 0:
         raise RuntimeError(
             "MMG mesh has no roller support facets with reference "
             f"{params.ref_dirichlet_roller}."
@@ -153,14 +157,16 @@ def _elasticity_bcs(V: fem.FunctionSpace, boundaries: BoundaryData) -> list[fem.
     fdim = msh.topology.dim - 1
     msh.topology.create_connectivity(fdim, msh.topology.dim)
 
+    # locate_dofs_topological is collective on MPI ranks: every rank calls it when any rank holds such facets (a rank
+    # may hold none of them), each with its own, possibly empty
     bcs: list[fem.DirichletBC] = []
-    if len(boundaries.left_facets) > 0:
+    if msh.comm.allreduce(len(boundaries.left_facets)) > 0:
         zero = np.zeros(msh.geometry.dim, dtype=default_scalar_type)
-        dofs = fem.locate_dofs_topological(V, fdim, boundaries.left_facets)
+        dofs = fem.locate_dofs_topological(V, fdim, np.asarray(boundaries.left_facets, dtype=np.int32))
         bcs.append(fem.dirichletbc(zero, dofs, V))
 
-    if len(boundaries.roller_facets) > 0:
-        dofs_y = fem.locate_dofs_topological(V.sub(1), fdim, boundaries.roller_facets)
+    if msh.comm.allreduce(len(boundaries.roller_facets)) > 0:
+        dofs_y = fem.locate_dofs_topological(V.sub(1), fdim, np.asarray(boundaries.roller_facets, dtype=np.int32))
         bcs.append(fem.dirichletbc(default_scalar_type(0.0), dofs_y, V.sub(1)))
 
     return bcs
@@ -223,7 +229,7 @@ def create_solid_submesh(
     tdim = msh.topology.dim
     refs = _cell_refs(msh, cell_tags)
     solid_cells = np.flatnonzero(refs == params.ref_solid).astype(np.int32)
-    if len(solid_cells) == 0:
+    if msh.comm.allreduce(len(solid_cells)) == 0:   # a rank may hold no solid cell
         raise RuntimeError("MMG mesh has no solid cells with REFINT/ref_solid.")
 
     def build(cells: np.ndarray) -> SolidSubmesh:

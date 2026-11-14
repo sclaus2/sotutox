@@ -21,7 +21,7 @@ from mpi4py import MPI
 from scipy.spatial import cKDTree
 
 from .parameters import Parameters
-from .redistance import graph_signed_distance
+from .redistance import exact_signed_distance, graph_signed_distance
 
 
 @dataclass(slots=True)
@@ -44,18 +44,17 @@ class RemeshedMesh:
 
 
 def _cell_vertices(msh: mesh.Mesh) -> np.ndarray:
-    tdim = msh.topology.dim
-    msh.topology.create_connectivity(tdim, 0)
-    c_to_v = msh.topology.connectivity(tdim, 0)
-    num_cells = msh.topology.index_map(tdim).size_local
-    return np.asarray([c_to_v.links(c) for c in range(num_cells)], dtype=np.int64)
+    """The geometry nodes of every local cell, the ghosts too (the numbering of ``msh.geometry.x``: on MPI ranks the
+    topology's vertex numbers differ from it)."""
+    imap = msh.topology.index_map(msh.topology.dim)
+    return np.asarray(msh.geometry.dofmaps[0], dtype=np.int64)[: imap.size_local + imap.num_ghosts]
 
 
 def _facet_vertices(msh: mesh.Mesh, facets: np.ndarray) -> np.ndarray:
+    """The geometry nodes of the facets (the numbering of ``msh.geometry.x``)."""
     fdim = msh.topology.dim - 1
-    msh.topology.create_connectivity(fdim, 0)
-    f_to_v = msh.topology.connectivity(fdim, 0)
-    return np.asarray([f_to_v.links(int(f)) for f in facets], dtype=np.int64)
+    msh.topology.create_connectivity(fdim, msh.topology.dim)
+    return mesh.entities_to_geometry(msh, fdim, np.asarray(facets, dtype=np.int32)).astype(np.int64)
 
 
 def _mesh_edges(msh: mesh.Mesh) -> np.ndarray:
@@ -77,8 +76,8 @@ def _tag_dict(tags: mesh.MeshTags | None) -> dict[int, int]:
 
 
 def _cell_refs(msh: mesh.Mesh, cell_tags: mesh.MeshTags | None) -> np.ndarray:
-    num_cells = msh.topology.index_map(msh.topology.dim).size_local
-    refs = np.ones(num_cells, dtype=np.int32)
+    imap = msh.topology.index_map(msh.topology.dim)
+    refs = np.ones(imap.size_local + imap.num_ghosts, dtype=np.int32)   # every local cell, the ghosts too
     if cell_tags is not None:
         refs[np.asarray(cell_tags.indices, dtype=np.int32)] = np.asarray(
             cell_tags.values, dtype=np.int32
@@ -501,7 +500,17 @@ def distance_level_set_from_tags(
 
     msh = phi.function_space.mesh
     if msh.comm.size != 1:
-        raise RuntimeError("Graph redistancing is serial-only.")
+        # on MPI ranks: the exact distance to the interface, gathered whole on every rank (the graph distance along the
+        # edges is serial); the sign from the same seeds
+        gdim = msh.geometry.dim
+        fdim = msh.topology.dim - 1
+        msh.topology.create_connectivity(fdim, msh.topology.dim)
+        facets = np.asarray(_interface_facets(facet_tags, params), dtype=np.int32)
+        nodes = mesh.entities_to_geometry(msh, fdim, facets).astype(np.int64)
+        X = msh.geometry.x[:, :gdim]
+        seeds = _phase_seed_values(phi, cell_tags, facet_tags, params)
+        _set_vertex_values(phi, exact_signed_distance(X, X[nodes], seeds, comm=msh.comm))
+        return
     signed = graph_signed_distance(
         msh.geometry.x[:, : msh.geometry.dim],
         _mesh_edges(msh),

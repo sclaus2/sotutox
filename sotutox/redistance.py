@@ -65,3 +65,67 @@ def graph_signed_distance(
     signed = signs * distances
     signed[np.abs(values) <= zero_tol] = 0.0
     return signed
+
+
+def _segment_distances(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Distances of the points p (n, d) to the segments (a, b) (n, d) each."""
+    ab = b - a
+    t = np.einsum("ij,ij->i", p - a, ab) / np.maximum(np.einsum("ij,ij->i", ab, ab), 1.0e-300)
+    t = np.clip(t, 0.0, 1.0)
+    return np.linalg.norm(p - (a + t[:, None] * ab), axis=1)
+
+
+def _triangle_distances(p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Distances of the points p (n, 3) to the triangles (a, b, c) (n, 3) each: the plane's where the foot falls inside
+    the triangle, else the nearest edge's."""
+    n = np.cross(b - a, c - a)
+    nn = np.linalg.norm(n, axis=1)
+    unit = n / np.maximum(nn, 1.0e-300)[:, None]
+    h = np.einsum("ij,ij->i", p - a, unit)
+    q = p - h[:, None] * unit
+    inside = (
+        (np.einsum("ij,ij->i", np.cross(b - a, q - a), unit) >= 0.0)
+        & (np.einsum("ij,ij->i", np.cross(c - b, q - b), unit) >= 0.0)
+        & (np.einsum("ij,ij->i", np.cross(a - c, q - c), unit) >= 0.0)
+        & (nn > 0.0)
+    )
+    edges = np.minimum(np.minimum(_segment_distances(p, a, b), _segment_distances(p, b, c)), _segment_distances(p, c, a))
+    return np.where(inside, np.abs(h), edges)
+
+
+def exact_signed_distance(
+    points: np.ndarray,
+    facets: np.ndarray,
+    signs: np.ndarray,
+    *,
+    comm=None,
+    candidates: int = 24,
+) -> np.ndarray:
+    """The exact distance of ``points`` (n, d) to an interface given as facets (m, d, d: segments in 2D, triangles in
+    3D), with the sign of ``signs`` (n: -1 in the solid, +1 in the void, 0 on the interface). On MPI ranks (``comm``,
+    an mpi4py communicator) every rank passes its own facets and gets the distance to all ranks' facets: the interface
+    is gathered whole on every rank, the points stay where they are. Each point takes the nearest of the facets whose
+    centroids are its ``candidates`` nearest. Without facets anywhere the result is ``signs`` with 0 as -1."""
+    from scipy.spatial import cKDTree
+
+    points = np.asarray(points, dtype=np.float64)
+    d = points.shape[1]
+    facets = np.asarray(facets, dtype=np.float64).reshape(-1, d, d)
+    if comm is not None and comm.size > 1:
+        facets = np.concatenate(comm.allgather(facets), axis=0)
+    signs = np.asarray(signs, dtype=np.float64)
+    if len(facets) == 0:
+        return np.where(signs > 0.0, 1.0, -1.0)
+    centroids = facets.mean(axis=1)
+    k = min(int(candidates), len(facets))
+    _, near = cKDTree(centroids).query(points, k=k)
+    near = np.asarray(near).reshape(len(points), k)
+    best = np.full(len(points), np.inf)
+    for j in range(k):
+        f = facets[near[:, j]]
+        if d == 2:
+            dist = _segment_distances(points, f[:, 0], f[:, 1])
+        else:
+            dist = _triangle_distances(points, f[:, 0], f[:, 1], f[:, 2])
+        best = np.minimum(best, dist)
+    return np.where(signs > 0.0, best, np.where(signs < 0.0, -best, 0.0))

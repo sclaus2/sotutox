@@ -108,11 +108,11 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
         np.logical_and(x >= BRIDGE_ROLLER_X_MIN - eps, x <= params.length + eps)
     ]
 
-    if len(left_support) == 0:
+    if msh.comm.allreduce(len(left_support)) == 0:
         raise RuntimeError("No left support facets found for the bridge example.")
-    if len(load) == 0:
+    if msh.comm.allreduce(len(load)) == 0:
         raise RuntimeError("No load facets found for the bridge example.")
-    if len(roller) == 0:
+    if msh.comm.allreduce(len(roller)) == 0:
         raise RuntimeError("No roller support facets found for the bridge example.")
 
     return BoundaryData(

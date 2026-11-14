@@ -201,9 +201,9 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
         )
     ]
 
-    if len(top) == 0:
+    if msh.comm.allreduce(len(top)) == 0:
         raise RuntimeError("No Dirichlet facets found for the L-beam example.")
-    if len(load) == 0:
+    if msh.comm.allreduce(len(load)) == 0:
         raise RuntimeError("No load facets found for the L-beam example.")
 
     return BoundaryData(

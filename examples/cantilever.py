@@ -115,7 +115,7 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
         right_midpoints[:, 1] <= CANTILEVER_LOAD_Y_MAX + 1.0e-12,
     )
     load = right[in_load_patch]
-    if len(load) == 0:
+    if msh.comm.allreduce(len(load)) == 0:
         raise RuntimeError("No load facets found for the cantilever example.")
 
     return BoundaryData(

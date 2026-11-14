@@ -39,7 +39,10 @@ def options(kind: str, msh) -> dict:
     direct solver in 2D, the iterative one in 3D."""
 
     if msh.topology.dim < 3:
-        return dict(DIRECT)
+        direct = dict(DIRECT)
+        if msh.comm.size > 1:   # PETSc's own LU is serial: MUMPS on ranks
+            direct["pc_factor_mat_solver_type"] = "mumps"
+        return direct
     return dict(ITERATIVE[kind])
 
 

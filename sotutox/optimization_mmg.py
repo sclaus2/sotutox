@@ -17,6 +17,7 @@ from pathlib import Path
 import meshio
 import numpy as np
 from dolfinx import fem, io, mesh
+from mpi4py import MPI
 from scipy.spatial import cKDTree
 
 from .advection import advect_level_set, normal_velocity_from_speed
@@ -50,6 +51,12 @@ from .topology import (
 )
 
 
+def _say(*args, **kwargs) -> None:
+    """Progress lines: on MPI ranks from rank 0 alone (every rank holds the same global values)."""
+    if MPI.COMM_WORLD.rank == 0:
+        print(*args, **kwargs)
+
+
 def _history_columns() -> list[str]:
     return [
         "iteration",
@@ -70,6 +77,8 @@ def _history_columns() -> list[str]:
 
 
 def _write_history(path: Path, rows: list[dict]) -> None:
+    if MPI.COMM_WORLD.rank != 0:   # every rank holds the same rows (global values): one writes
+        return
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_history_columns())
         writer.writeheader()
@@ -82,7 +91,8 @@ def _cell_tag_function(
     """Return a DG0 scalar copy of cell references for ParaView coloring."""
 
     Q = fem.functionspace(msh, ("DG", 0))
-    values = np.zeros(msh.topology.index_map(msh.topology.dim).size_local)
+    imap = msh.topology.index_map(msh.topology.dim)
+    values = np.zeros(imap.size_local + imap.num_ghosts)   # every local cell, the ghosts too
     values[np.asarray(cell_tags.indices, dtype=np.int32)] = np.asarray(
         cell_tags.values, dtype=np.float64
     )
@@ -95,18 +105,17 @@ def _cell_tag_function(
 
 
 def _cell_vertices(msh: mesh.Mesh) -> np.ndarray:
-    tdim = msh.topology.dim
-    msh.topology.create_connectivity(tdim, 0)
-    c_to_v = msh.topology.connectivity(tdim, 0)
-    num_cells = msh.topology.index_map(tdim).size_local
-    return np.asarray([c_to_v.links(c) for c in range(num_cells)], dtype=np.int64)
+    """The geometry nodes of every local cell, the ghosts too (the numbering of ``msh.geometry.x``: on MPI ranks the
+    topology's vertex numbers differ from it)."""
+    imap = msh.topology.index_map(msh.topology.dim)
+    return np.asarray(msh.geometry.dofmaps[0], dtype=np.int64)[: imap.size_local + imap.num_ghosts]
 
 
 def _facet_vertices(msh: mesh.Mesh, facets: np.ndarray) -> np.ndarray:
+    """The geometry nodes of the facets (the numbering of ``msh.geometry.x``)."""
     fdim = msh.topology.dim - 1
-    msh.topology.create_connectivity(fdim, 0)
-    f_to_v = msh.topology.connectivity(fdim, 0)
-    return np.asarray([f_to_v.links(int(f)) for f in facets], dtype=np.int64)
+    msh.topology.create_connectivity(fdim, msh.topology.dim)
+    return mesh.entities_to_geometry(msh, fdim, np.asarray(facets, dtype=np.int32)).astype(np.int64)
 
 
 def _points3(msh: mesh.Mesh) -> np.ndarray:
@@ -119,7 +128,8 @@ def _points3(msh: mesh.Mesh) -> np.ndarray:
 
 
 def _cell_tag_values(msh: mesh.Mesh, cell_tags: mesh.MeshTags) -> np.ndarray:
-    values = np.zeros(msh.topology.index_map(msh.topology.dim).size_local)
+    imap = msh.topology.index_map(msh.topology.dim)
+    values = np.zeros(imap.size_local + imap.num_ghosts)   # every local cell, the ghosts too
     values[np.asarray(cell_tags.indices, dtype=np.int32)] = np.asarray(
         cell_tags.values, dtype=np.float64
     )
@@ -289,6 +299,8 @@ def _write_paraview_step(
     gradients: Gradients | None = None,
     velocity: fem.Function | None = None,
 ) -> None:
+    if step.mesh.comm.size > 1:   # the VTU writers are serial; on MPI ranks the XDMF files hold the steps
+        return
     vtu_dir = output_dir / "vtu"
     vtu_dir.mkdir(parents=True, exist_ok=True)
 
@@ -349,11 +361,13 @@ def _write_step(
 
 
 def _num_cells(step: RemeshedLevelSet) -> int:
-    return step.mesh.topology.index_map(step.mesh.topology.dim).size_local
+    """The mesh's cells over all ranks."""
+    return int(step.mesh.topology.index_map(step.mesh.topology.dim).size_global)
 
 
 def _num_vertices(step: RemeshedLevelSet) -> int:
-    return step.mesh.geometry.x.shape[0]
+    """The mesh's vertices over all ranks."""
+    return int(step.mesh.topology.index_map(0).size_global)
 
 
 def _use_topological_derivative(iteration: int, params: Parameters) -> bool:
@@ -377,11 +391,8 @@ def _triangle_areas(msh: mesh.Mesh) -> np.ndarray:
 
 
 def _cell_tag_int_values(msh: mesh.Mesh, cell_tags: mesh.MeshTags) -> np.ndarray:
-    values = np.full(
-        msh.topology.index_map(msh.topology.dim).size_local,
-        -1,
-        dtype=np.int32,
-    )
+    imap = msh.topology.index_map(msh.topology.dim)
+    values = np.full(imap.size_local + imap.num_ghosts, -1, dtype=np.int32)   # every local cell, the ghosts too
     values[np.asarray(cell_tags.indices, dtype=np.int32)] = np.asarray(
         cell_tags.values, dtype=np.int32
     )
@@ -527,6 +538,13 @@ def _cleanup_small_void_components(
     name: str,
     remesher=None,
 ) -> RemeshedLevelSet:
+    if step.mesh.comm.size > 1:
+        if params.void_cleanup_min_hole_radius > 0.0:   # its void components are found on one process
+            raise NotImplementedError(
+                "void_cleanup_min_hole_radius > 0 is serial-only; on MPI ranks set it to 0 (ShapeForest's conform "
+                "joins small parts itself: min_part, min_radius)"
+            )
+        return step
     removed_cells, removed_areas = _small_void_component_cells(step, params)
     if len(removed_cells) == 0:
         return step
@@ -541,7 +559,7 @@ def _cleanup_small_void_components(
     area_preview = ", ".join(f"{area:.3e}" for area in removed_areas[:5])
     if len(removed_areas) > 5:
         area_preview += ", ..."
-    print(
+    _say(
         "  cleanup "
         f"removed {len(removed_areas)} small void component(s) "
         f"area=[{area_preview}]"
@@ -635,7 +653,7 @@ def run(
             current.mesh, current.cell_tags, current.facet_tags, params
         )
 
-        print(
+        _say(
             f"it={iteration:03d} "
             f"cells={_num_cells(current):d} "
             f"J={state.compliance:.6e} "
@@ -760,7 +778,7 @@ def run(
                     + params.topological_tolerance * abs(current_merit)
                 )
             except RuntimeError as exc:
-                print(
+                _say(
                     "  topder "
                     f"volume_fraction={params.topological_volume_fraction:.3e} "
                     "failed; reject"
@@ -774,7 +792,7 @@ def run(
                         "Initial topological derivative update failed."
                     ) from exc
 
-            print(
+            _say(
                 f"  topder volume_fraction={params.topological_volume_fraction:.3e} "
                 f"trial_merit={trial_merit:.6e} {'accept' if accepted else 'reject'}"
             )
@@ -830,7 +848,7 @@ def run(
                     trial, params, mmg_dir, f"it{iteration:04d}_ls{k}", remesher
                 )
             except RuntimeError as exc:
-                print(
+                _say(
                     f"  ls={k} coef={coef:.3e} MMG remesh failed; reject"
                 )
                 if k == params.max_line_search - 1:
@@ -847,7 +865,7 @@ def run(
                     trial.mesh, trial.cell_tags, trial.facet_tags, params
                 )
             except RuntimeError as exc:
-                print(
+                _say(
                     f"  ls={k} coef={coef:.3e} fitted state failed; reject"
                 )
                 if k == params.max_line_search - 1:
@@ -862,7 +880,7 @@ def run(
                 and math.isfinite(trial_state.volume)
                 and math.isfinite(trial_merit)
             ):
-                print(
+                _say(
                     f"  ls={k} coef={coef:.3e} non-finite fitted state; reject"
                 )
                 if k == params.max_line_search - 1:
@@ -876,7 +894,7 @@ def run(
                 or k == params.max_line_search - 1
                 or coef < params.min_coef
             )
-            print(
+            _say(
                 f"  ls={k} coef={coef:.3e} cells={_num_cells(trial):d} "
                 f"trial_merit={trial_merit:.6e} {'accept' if accept else 'reject'}"
             )

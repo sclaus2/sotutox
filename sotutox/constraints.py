@@ -74,9 +74,9 @@ def _all_load_boundaries(
     facets = np.asarray(facet_tags.indices, dtype=np.int32)
     left = facets[values == params.ref_dirichlet]
     load = facets[np.isin(values, np.asarray(load_refs, dtype=np.int32))]
-    if len(left) == 0:
+    if facet_tags.topology.comm.allreduce(len(left)) == 0:
         raise RuntimeError("MMG mesh has no Dirichlet facets.")
-    if len(load) == 0:
+    if facet_tags.topology.comm.allreduce(len(load)) == 0:
         raise RuntimeError("MMG mesh has no load facets.")
     return BoundaryData(left_facets=left, load_facets=load, facet_tags=facet_tags)
 

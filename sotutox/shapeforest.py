@@ -151,6 +151,9 @@ class ShapeForestRemesher:
     def standard(self, msh, facet_tags, cell_tags, params: Parameters, work_dir, name) -> RemeshedMesh:
         """The first mesh, which phi0 is sampled on."""
         if self.start == "mmg":
+            if msh.comm.size > 1:
+                raise ValueError("ShapeForestRemesher on MPI ranks: start='mmg' runs mmg, which is serial; valid: "
+                                 "start='initial'")
             return run_mmg_standard(msh, facet_tags, cell_tags, params, work_dir, name)
         d = msh.topology.dim
         n_cells = msh.topology.index_map(d).size_local
@@ -165,16 +168,20 @@ class ShapeForestRemesher:
                                        gradient=lumped_gradient(X, T, values), between="hermite")
         return sm.sources.lagrange(points=X, cells=T32, values=values, dofmap=T32, nodes=_P1[d], dtype="float64")
 
-    def conform(self, X: np.ndarray, T: np.ndarray, values: np.ndarray):
-        """conform on (X, T) with phi's vertex values: the result and its report."""
-        d = X.shape[1]
-        L = self.source(X, T, values)
-        T32 = np.ascontiguousarray(T, np.int32)
+    def _kw(self) -> dict:
         kw = dict(h=self.h, tol=self.tol, h_min=self.h_min, patches=[s for s, _ in self.patches], anchors=self.anchors,
                   min_part=self.min_part, backend="cpp", changed_only=self.changed_only,
                   no_cross_edges=self.no_cross_edges, snap=self.snap)
         if self.min_radius is not None:
             kw["min_radius"] = self.min_radius
+        return kw
+
+    def conform(self, X: np.ndarray, T: np.ndarray, values: np.ndarray):
+        """conform on (X, T) with phi's vertex values: the result and its report."""
+        d = X.shape[1]
+        L = self.source(X, T, values)
+        T32 = np.ascontiguousarray(T, np.int32)
+        kw = self._kw()
         if d == 3:
             # the rule's floor and conform's tuning knobs go through options; planar's floor is fixed (2 h_min) and its
             # knobs are keywords
@@ -192,6 +199,8 @@ class ShapeForestRemesher:
     def level_set(self, msh, phi, facet_tags, cell_tags, params: Parameters, work_dir, name) -> RemeshedLevelSet:
         """phi's zero set made the mesh's interface: the new mesh with its tags and phi seeded by the tags (the loop
         redistances it)."""
+        if msh.comm.size > 1:
+            return self._level_set_ranks(msh, phi, params, name)
         X, T = cells_of(msh)
         values = np.ascontiguousarray(_vertex_values(phi), np.float64)
         t0 = time.perf_counter()
@@ -217,3 +226,66 @@ class ShapeForestRemesher:
         if report.get("fallback"):
             print(f"  remesh {name}: fell back to P1: {report['fallback']['reason']}"[:400], flush=True)
         return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
+
+    def _level_set_ranks(self, msh, phi, params: Parameters, name) -> RemeshedLevelSet:
+        """On MPI ranks (2D): each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
+        ``from_fem(gather=False)``), conform on the ranks with nothing gathered, and the parts made one DOLFINx mesh
+        (``sm.fem.to_dolfinx``) with sotutox's references."""
+        d = msh.topology.dim
+        if d != 2:
+            raise NotImplementedError(
+                "ShapeForestRemesher on MPI ranks: 2D so far; 3D needs volume.conform(comm=) (ShapeForest's "
+                "docs/conform_mpi_plan.md, section 27)"
+            )
+        if self.representation != "p1":
+            raise ValueError("ShapeForestRemesher on MPI ranks: representation='p1' (conform on ranks reads no "
+                             "derivatives); valid: 'p1'")
+        t0 = time.perf_counter()
+        try:
+            part = sm.sources.dolfinx_mesh(msh)
+            L = sm.sources.from_fem(phi, gather=False, dtype="float64")
+            kw = self._kw()
+            kw.update(self.options)
+            mine, report = sm.planar.conform(part, None, L, comm=sm.mpi.comm(msh.comm), gather=False, **kw)
+            out = sm.fem.to_dolfinx(mine, msh.comm)
+            new, new_cells, new_facets = _tags_on_ranks(out, params, [ref for _, ref in self.patches])
+        except (sm.MeshingError, ValueError, RuntimeError) as error:
+            self.calls.append(dict(name=name, seconds=time.perf_counter() - t0, cells=0, ok=False))
+            if msh.comm.rank == 0:
+                print(f"  remesh {name} failed: {type(error).__name__}: {error}"[:400], flush=True)
+            raise RuntimeError(f"ShapeForest's conform failed at {name}") from error
+        V = fem.functionspace(new, ("Lagrange", 1))
+        new_phi = fem.Function(V, name="phi")
+        _set_vertex_values(new_phi, _phase_seed_values(new_phi, new_cells, new_facets, params))
+        n_cells = new.comm.allreduce(int(new.topology.index_map(d).size_local))
+        self.calls.append(dict(name=name, seconds=time.perf_counter() - t0, cells=n_cells, ok=True))
+        return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
+
+
+def _tags_on_ranks(out, params: Parameters, patch_refs: list[int]):
+    """sotutox's references on a ``sm.fem.to_dolfinx`` result: material 0 solid, else void; the interface; the outer
+    facets of patch k ``patch_refs[k]``, the other outer facets 0."""
+    new = out.mesh
+    d = new.topology.dim
+    cells = np.asarray(out.cells.indices, np.int32)
+    cell_tags = mesh.meshtags(new, d, cells, np.where(np.asarray(out.cells.values) == 0, params.ref_solid,
+                                                       params.ref_void).astype(np.int32))
+    indices, values = [], []
+    if out.interface is not None:
+        indices.append(np.asarray(out.interface.indices, np.int32))
+        values.append(np.full(len(out.interface.indices), params.ref_interface, np.int32))
+    if out.outer is not None:
+        patch = np.asarray(out.outer.values)
+        ok = (patch >= 0) & (patch < len(patch_refs))
+        indices.append(np.asarray(out.outer.indices, np.int32)[ok])
+        values.append(np.asarray(patch_refs, np.int32)[patch[ok]])
+    new.topology.create_connectivity(d - 1, d)
+    exterior = np.asarray(mesh.exterior_facet_indices(new.topology), np.int32)
+    tagged = np.concatenate(indices) if indices else np.zeros(0, np.int32)
+    rest = np.setdiff1d(exterior, tagged)
+    indices.append(rest)
+    values.append(np.zeros(len(rest), np.int32))
+    idx, val = np.concatenate(indices), np.concatenate(values)
+    idx, first = np.unique(idx, return_index=True)
+    return new, cell_tags, mesh.meshtags(new, d - 1, idx, val[first])
+

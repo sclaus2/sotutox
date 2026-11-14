@@ -187,9 +187,9 @@ def mark_boundaries(msh: mesh.Mesh, params: Parameters) -> BoundaryData:
     )
     load = right[radius2 <= CANTILEVER_3D_LOAD_RADIUS**2 + 1.0e-12]
 
-    if len(clamp) == 0:
+    if msh.comm.allreduce(len(clamp)) == 0:
         raise RuntimeError("No clamp facets found for the 3D cantilever.")
-    if len(load) == 0:
+    if msh.comm.allreduce(len(load)) == 0:
         raise RuntimeError("No load facets found for the 3D cantilever.")
 
     return BoundaryData(
