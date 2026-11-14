@@ -12,8 +12,12 @@ resolution joined, solid parts that do not reach the ``anchors`` patch removed (
 wall with none inside has no sign and opens at the next step (mmg's FEM mode does the same). With P1+G, changed_only and
 no_cross_edges the 3D cantilever at h 0.07 reached mmg3d's design (J 0.170 at iteration 60).
 
+On MPI ranks the loop starts from its initial mesh (``start="initial"``). In 2D each rank conforms its own cells (P1); in
+3D every rank is given the whole mesh and phi, and the remesh runs on the ranks (P1 or P1+G, changed_only off).
+
 ShapeForest is optional: importing this module raises ImportError when it is not installed. Its compiled mesher
-(``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later) must match its Python package.
+(``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later; 3D on MPI ranks ``meshing/volume-ranks``, an MPI
+build) must match its Python package.
 """
 
 from __future__ import annotations
@@ -123,7 +127,12 @@ class ShapeForestRemesher:
     ``snap``: conform's. ``representation`` of phi: ``"p1"`` or ``"p1g"``. ``changed_only``: remesh only around the change.
     ``no_cross_edges`` and ``cross_floor`` (x h_min; 3D only, 2D's floor is 2 h_min): the rule above. ``start``: the first mesh, which phi0 is sampled on --
     ``"mmg"`` (sotutox's mmg remesh of the initial mesh, as the mmg loop starts) or ``"initial"`` (the initial mesh as it is:
-    no mmg anywhere). ``options``: conform's ``options``. ``failures``: a folder that keeps the input of every failed call."""
+    no mmg anywhere). ``rounds``: on MPI ranks in 3D, the remesh's rounds (``volume.conform(rounds=)``: each round moves
+    the parts' borders). ``options``: conform's ``options``. ``failures``: a folder that keeps the input of every failed
+    call.
+
+    On MPI ranks (``msh.comm.size > 1``): ``start="initial"``. In 2D each rank conforms its own cells (P1 only); in 3D
+    every rank is given the whole input and the remesh runs on the ranks, with P1 or P1+G, changed_only off."""
 
     patches: list = field(default_factory=list)
     h: float = 0.07
@@ -138,6 +147,7 @@ class ShapeForestRemesher:
     no_cross_edges: bool = True
     cross_floor: float | None = 0.5
     start: str = "mmg"
+    rounds: int = 4
     options: dict = field(default_factory=dict)
     failures: Path | None = None
     calls: list = field(default_factory=list)   # per call: name, seconds, cells, ok
@@ -176,12 +186,18 @@ class ShapeForestRemesher:
             kw["min_radius"] = self.min_radius
         return kw
 
-    def conform(self, X: np.ndarray, T: np.ndarray, values: np.ndarray):
-        """conform on (X, T) with phi's vertex values: the result and its report."""
+    def conform(self, X: np.ndarray, T: np.ndarray, values: np.ndarray, comm=None):
+        """conform on (X, T) with phi's vertex values: the result and its report. ``comm`` (3D): the whole input on
+        every rank, the remesh on the ranks (volume.conform(comm=)), changed_only off (one process only so far)."""
         d = X.shape[1]
         L = self.source(X, T, values)
         T32 = np.ascontiguousarray(T, np.int32)
         kw = self._kw()
+        if comm is not None:
+            if d != 3:
+                raise ValueError("ShapeForestRemesher.conform(comm=): 3D only (2D on ranks conforms each rank's own "
+                                 "cells: level_set)")
+            kw.update(comm=sm.mpi.comm(comm), rounds=int(self.rounds), changed_only=False)
         if d == 3:
             # the rule's floor and conform's tuning knobs go through options; planar's floor is fixed (2 h_min) and its
             # knobs are keywords
@@ -228,15 +244,12 @@ class ShapeForestRemesher:
         return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
 
     def _level_set_ranks(self, msh, phi, params: Parameters, name) -> RemeshedLevelSet:
-        """On MPI ranks (2D): each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
+        """On MPI ranks (2D; 3D: ``_level_set_ranks_3d``): each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
         ``from_fem(gather=False)``), conform on the ranks with nothing gathered, and the parts made one DOLFINx mesh
         (``sm.fem.to_dolfinx``) with sotutox's references."""
         d = msh.topology.dim
-        if d != 2:
-            raise NotImplementedError(
-                "ShapeForestRemesher on MPI ranks: 2D so far; 3D needs volume.conform(comm=) (ShapeForest's "
-                "docs/conform_mpi_plan.md, section 27)"
-            )
+        if d == 3:
+            return self._level_set_ranks_3d(msh, phi, params, name)
         if self.representation != "p1":
             raise ValueError("ShapeForestRemesher on MPI ranks: representation='p1' (conform on ranks reads no "
                              "derivatives); valid: 'p1'")
@@ -259,6 +272,40 @@ class ShapeForestRemesher:
         _set_vertex_values(new_phi, _phase_seed_values(new_phi, new_cells, new_facets, params))
         n_cells = new.comm.allreduce(int(new.topology.index_map(d).size_local))
         self.calls.append(dict(name=name, seconds=time.perf_counter() - t0, cells=n_cells, ok=True))
+        return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
+
+    def _level_set_ranks_3d(self, msh, phi, params: Parameters, name) -> RemeshedLevelSet:
+        """On MPI ranks in 3D (ShapeForest's docs/conform_mpi_plan.md section 29, M2a): the whole mesh and phi gathered
+        on every rank (``gather_whole``), the cut and the correction there, the remesh on the ranks
+        (``volume.conform(comm=)``, changed_only off); the result one DOLFINx mesh that dolfinx distributes from rank 0
+        (``to_dolfinx_from_whole``)."""
+        if self.changed_only and not self.calls and msh.comm.rank == 0:
+            print("  ShapeForestRemesher: changed_only is off on MPI ranks in 3D (ShapeForest's M4 is not there yet)",
+                  flush=True)
+        t0 = time.perf_counter()
+        X, T, values = gather_whole(msh, phi)
+        try:
+            out, report = self.conform(X, T, values, comm=msh.comm)
+            new, new_cells, new_facets = to_dolfinx_from_whole(out, params, [ref for _, ref in self.patches], msh.comm)
+        except (sm.MeshingError, ValueError, RuntimeError) as error:
+            self.calls.append(dict(name=name, seconds=time.perf_counter() - t0, cells=0, ok=False))
+            if msh.comm.rank == 0:
+                if self.failures is not None:
+                    Path(self.failures).mkdir(parents=True, exist_ok=True)
+                    np.savez(Path(self.failures) / f"{name}.npz", points=X, cells=T, values=values, error=str(error))
+                print(f"  remesh {name} failed: {type(error).__name__}: {error}"[:400], flush=True)
+            raise RuntimeError(f"ShapeForest's conform failed at {name}") from error
+        V = fem.functionspace(new, ("Lagrange", 1))
+        new_phi = fem.Function(V, name="phi")
+        _set_vertex_values(new_phi, _phase_seed_values(new_phi, new_cells, new_facets, params))
+        n_cells = int(new.topology.index_map(3).size_global)
+        self.calls.append(dict(name=name, seconds=time.perf_counter() - t0, cells=n_cells, ok=True))
+        if msh.comm.rank == 0:
+            joined = (report.get("small_parts") or {}).get("joined") or []
+            if joined:
+                print(f"  remesh {name}: joined {len(joined)} parts below the resolution or min_part", flush=True)
+            if report.get("fallback"):
+                print(f"  remesh {name}: fell back to P1: {report['fallback']['reason']}"[:400], flush=True)
         return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
 
 
@@ -289,3 +336,56 @@ def _tags_on_ranks(out, params: Parameters, patch_refs: list[int]):
     idx, first = np.unique(idx, return_index=True)
     return new, cell_tags, mesh.meshtags(new, d - 1, idx, val[first])
 
+
+def gather_whole(msh, phi) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The whole mesh and phi's vertex values on every rank: each rank's nodes by their index in the mesh's input
+    (``geometry.input_global_indices``, the same on every rank that holds a node) with their positions and values, and
+    its owned cells by those indices. Positively oriented cells."""
+    d = msh.topology.dim
+    comm = msh.comm
+    ign = np.asarray(msh.geometry.input_global_indices, np.int64)
+    x = np.ascontiguousarray(msh.geometry.x[:, :d], np.float64)
+    v = np.asarray(_vertex_values(phi), np.float64)
+    own = msh.topology.index_map(d).size_local
+    cells = ign[np.asarray(msh.geometry.dofmaps[0], np.int64)[:own]]
+    parts = comm.allgather((ign, x, v, cells))
+    n = 1 + max(int(p[0].max()) if len(p[0]) else -1 for p in parts)
+    X = np.zeros((n, d))
+    values = np.zeros(n)
+    for ids, xs, vs, _ in parts:
+        X[ids] = xs
+        values[ids] = vs
+    T = np.concatenate([p[3] for p in parts], axis=0)
+    used = np.unique(T)
+    remap = np.full(n, -1, np.int64)
+    remap[used] = np.arange(len(used))
+    X, values, T = X[used], values[used], remap[T]
+    p = X[T]
+    J = np.stack([p[:, j + 1] - p[:, 0] for j in range(d)], axis=2)
+    flip = np.linalg.det(J) < 0.0
+    T[flip] = T[flip][:, [1, 0] + list(range(2, d + 1))]
+    return np.ascontiguousarray(X), np.ascontiguousarray(T), np.ascontiguousarray(values)
+
+
+def to_dolfinx_from_whole(out, params: Parameters, patch_refs: list[int], comm):
+    """A whole 3D conform result, the same on every rank, as one DOLFINx mesh distributed over ``comm`` (ShapeForest's
+    ``sm.fem.from_parts``: rank 0 gives every cell, dolfinx's partitioner places them, with the ghosts ``dS`` needs) and
+    sotutox's references: material 0 solid, else void; the interface ``params.ref_interface``; the outer faces of patch
+    k ``patch_refs[k]``, the other outer faces 0."""
+    X = np.asarray(out.points, np.float64)
+    T = np.asarray(out.tets, np.int64)
+    K = np.asarray(out.keys, np.uint64)
+    refs = np.where(np.asarray(out.materials) == 0, params.ref_solid, params.ref_void).astype(np.int32)
+    O = np.asarray(out.outer_faces, np.int64).reshape(-1, 3)
+    ov = np.zeros(len(O), np.int32)
+    if out.outer_face_patch is not None:
+        patch = np.asarray(out.outer_face_patch)
+        for k, ref in enumerate(patch_refs):
+            ov[patch == k] = ref
+    Fi = np.asarray(out.faces, np.int64).reshape(-1, 3)
+    F = np.concatenate([O, Fi])
+    Fv = np.concatenate([ov, np.full(len(Fi), params.ref_interface, np.int32)])
+    if comm.rank != 0:
+        X, T, K, refs, F, Fv = X[:0], T[:0], K[:0], refs[:0], F[:0], Fv[:0]
+    msh, cell_tags, facets = sm.fem.from_parts(comm, X, T, K, cell_values=refs, facet_sets=dict(tags=(F, Fv)))
+    return msh, cell_tags, facets["tags"]

@@ -66,6 +66,10 @@ class Parameters:
     void_cleanup_min_hole_radius: float
     output_every: int
     load_z: float = 0.0
+    # how the loop rebuilds phi from the new mesh's tags: "graph" (the signed distance along the mesh's edges, one process
+    # only), "exact" (to the interface's facets, gathered whole on every MPI rank) or "auto" (graph on one process, exact
+    # on ranks)
+    redistancing: str = "auto"
 
     @property
     def mesh_size(self) -> float:

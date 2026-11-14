@@ -67,6 +67,25 @@ def _parser(
         help="ShapeForest: the first mesh, mmg's remesh of the initial mesh or the initial mesh as it is.",
     )
     parser.add_argument(
+        "--redistancing",
+        choices=("auto", "graph", "exact"),
+        default=None,
+        help="How phi is rebuilt from the new mesh's tags: the distance along the edges (graph, one process), to the "
+        "interface's facets (exact) or auto (graph on one process, exact on MPI ranks).",
+    )
+    parser.add_argument(
+        "--sf-changed-only",
+        choices=("on", "off"),
+        default=None,
+        help="ShapeForest: remesh only around the change (on) or everywhere (off; on MPI ranks in 3D it is off).",
+    )
+    parser.add_argument(
+        "--sf-rounds",
+        type=int,
+        default=None,
+        help="ShapeForest, 3D on MPI ranks: the remesh's rounds (each moves the parts' borders).",
+    )
+    parser.add_argument(
         "--advection",
         choices=("supg", "midpoint", "euler"),
         default=defaults.advection_backend,
@@ -154,9 +173,12 @@ def _shapeforest_remesher(args, params: Parameters, settings: Callable[[Paramete
         ("sf_level_set", "representation"),
         ("sf_cross_floor", "cross_floor"),
         ("sf_start", "start"),
+        ("sf_rounds", "rounds"),
     ):
         if getattr(args, option) is not None:
             kw[key] = getattr(args, option)
+    if args.sf_changed_only is not None:
+        kw["changed_only"] = args.sf_changed_only == "on"
     if args.sf_h is not None and args.sf_tol is None:
         kw["tol"] = 0.25 * args.sf_h
     kw.setdefault("failures", args.output_dir / "failures")
@@ -220,6 +242,7 @@ def run_example(
         ),
         topological_min_hole_radius=args.topological_min_hole_radius,
         void_cleanup_min_hole_radius=args.void_cleanup_min_hole_radius,
+        redistancing=args.redistancing if args.redistancing is not None else params.redistancing,
     )
     configured_run_kwargs = {} if run_kwargs is None else dict(run_kwargs)
     if create_initial_mesh is not None:

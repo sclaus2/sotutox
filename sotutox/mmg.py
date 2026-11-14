@@ -499,9 +499,15 @@ def distance_level_set_from_tags(
     """
 
     msh = phi.function_space.mesh
-    if msh.comm.size != 1:
-        # on MPI ranks: the exact distance to the interface, gathered whole on every rank (the graph distance along the
-        # edges is serial); the sign from the same seeds
+    how = getattr(params, "redistancing", "auto")
+    if how not in ("auto", "graph", "exact"):
+        raise ValueError(f"redistancing must be 'auto', 'graph' or 'exact', got {how!r}")
+    if how == "graph" and msh.comm.size != 1:
+        raise ValueError("redistancing='graph' runs on one process (the distance along the edges is serial); valid on MPI "
+                         "ranks: 'exact' or 'auto'")
+    if how == "exact" or msh.comm.size != 1:
+        # the exact distance to the interface, gathered whole on every rank (the graph distance along the edges is
+        # serial); the sign from the same seeds
         gdim = msh.geometry.dim
         fdim = msh.topology.dim - 1
         msh.topology.create_connectivity(fdim, msh.topology.dim)
