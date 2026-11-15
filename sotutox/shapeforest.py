@@ -246,11 +246,13 @@ class ShapeForestRemesher:
         return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
 
     def _level_set_ranks(self, msh, phi, params: Parameters, name) -> RemeshedLevelSet:
-        """On MPI ranks (2D; 3D: ``_level_set_ranks_3d``): each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
-        ``from_fem(gather=False)``), conform on the ranks with nothing gathered, and the parts made one DOLFINx mesh
-        (``sm.fem.to_dolfinx``) with sotutox's references."""
+        """On MPI ranks: each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
+        ``from_fem(gather=False)``), conform on the ranks with nothing gathered (2D; 3D: ``volume.conform`` with
+        ``parts``, ShapeForest's M2b), and the parts made one DOLFINx mesh (``sm.fem.to_dolfinx``) with sotutox's
+        references. In 3D, P1+G and changed_only take the whole input on every rank (``_level_set_ranks_3d``): the cut
+        on parts is P1 so far, without changed_only."""
         d = msh.topology.dim
-        if d == 3:
+        if d == 3 and (self.representation != "p1" or self.changed_only):
             return self._level_set_ranks_3d(msh, phi, params, name)
         if self.representation != "p1":
             raise ValueError("ShapeForestRemesher on MPI ranks: representation='p1' (conform on ranks reads no "
@@ -260,8 +262,18 @@ class ShapeForestRemesher:
             part = sm.sources.dolfinx_mesh(msh)
             L = sm.sources.from_fem(phi, gather=False, dtype="float64")
             kw = self._kw()
-            kw.update(self.options)
-            mine, report = sm.planar.conform(part, None, L, comm=sm.mpi.comm(msh.comm), gather=False, **kw)
+            c = sm.mpi.comm(msh.comm)
+            if d == 3:
+                options = dict(self.options)
+                if self.no_cross_edges and self.cross_floor is not None:
+                    options.setdefault("cross_floor", float(self.cross_floor))
+                if options:
+                    kw["options"] = options
+                mine, report = sm.volume.conform(part, None, L, comm=c, parts=True, gather=False,
+                                                 rounds=int(self.rounds), **kw)
+            else:
+                kw.update(self.options)
+                mine, report = sm.planar.conform(part, None, L, comm=c, gather=False, **kw)
             out = sm.fem.to_dolfinx(mine, msh.comm)
             new, new_cells, new_facets = _tags_on_ranks(out, params, [ref for _, ref in self.patches])
         except (sm.MeshingError, ValueError, RuntimeError) as error:
