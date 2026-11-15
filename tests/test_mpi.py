@@ -3,7 +3,7 @@
 """The loop on MPI ranks with ShapeForest's remesher, through mpiexec on 1 and 2 ranks:
 - 2D: the cantilever, three iterations (each rank conforms its own cells);
 - 3D: the cantilever at h 0.12, two iterations (every rank is given the whole input, the remesh runs on the ranks),
-  changed_only off on both, as on ranks.
+  with changed_only off on both, and on (on ranks the rounds start around the change: ShapeForest's M4).
 Both runs finish, write one history (rank 0), and follow each other: a mesh on ranks is a different mesh, so J agrees
 to a few parts in a thousand, not bit for bit.
 
@@ -68,3 +68,16 @@ def test_the_3d_loop_runs_on_two_ranks_and_follows_one(tmp_path):
         assert abs(float(a["compliance"]) - float(b["compliance"])) < 1e-2 * float(a["compliance"])
         assert abs(float(a["volume"]) - float(b["volume"])) < 2e-3 * float(a["volume"])
     assert float(two[-1]["volume"]) < float(two[0]["volume"])
+
+
+def test_the_3d_loop_with_changed_only_runs_on_two_ranks_and_follows_one(tmp_path):
+    # 2 %, not 1 %: one process remeshes the band in two frozen rounds, the ranks in seeded rounds, each falling back
+    # to the whole remesh by its own count of the band (J 1.07 % apart at iteration 2 on 15 November)
+    options = ("--sf-h", "0.12", "--sf-h-min", "0.06", "--sf-changed-only", "on")
+    one = _run(1, tmp_path / "one", "cantilever_3d.py", options, iterations=2)
+    two = _run(2, tmp_path / "two", "cantilever_3d.py", options, iterations=2)
+    assert len(one) >= 2 and len(two) >= 2
+    for a, b in zip(one, two):
+        assert abs(float(a["compliance"]) - float(b["compliance"])) < 2e-2 * float(a["compliance"])
+        assert abs(float(a["volume"]) - float(b["volume"])) < 2e-3 * float(a["volume"])
+

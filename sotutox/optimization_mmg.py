@@ -52,8 +52,10 @@ from .topology import (
 
 
 def _say(*args, **kwargs) -> None:
-    """Progress lines: on MPI ranks from rank 0 alone (every rank holds the same global values)."""
+    """Progress lines: on MPI ranks from rank 0 alone (every rank holds the same global values), flushed (a log file
+    shows them as they come)."""
     if MPI.COMM_WORLD.rank == 0:
+        kwargs.setdefault("flush", True)
         print(*args, **kwargs)
 
 

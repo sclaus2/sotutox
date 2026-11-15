@@ -13,11 +13,12 @@ wall with none inside has no sign and opens at the next step (mmg's FEM mode doe
 no_cross_edges the 3D cantilever at h 0.07 reached mmg3d's design (J 0.170 at iteration 60).
 
 On MPI ranks the loop starts from its initial mesh (``start="initial"``). In 2D each rank conforms its own cells (P1); in
-3D every rank is given the whole mesh and phi, and the remesh runs on the ranks (P1 or P1+G, changed_only off).
+3D every rank is given the whole mesh and phi, and the remesh runs on the ranks (P1 or P1+G; changed_only starts its
+rounds around the change).
 
 ShapeForest is optional: importing this module raises ImportError when it is not installed. Its compiled mesher
-(``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later; 3D on MPI ranks ``meshing/volume-ranks``, an MPI
-build) must match its Python package.
+(``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later; 3D on MPI ranks ``meshing/volume-ranks`` from M4,
+ABI 56, an MPI build) must match its Python package.
 """
 
 from __future__ import annotations
@@ -132,7 +133,8 @@ class ShapeForestRemesher:
     call.
 
     On MPI ranks (``msh.comm.size > 1``): ``start="initial"``. In 2D each rank conforms its own cells (P1 only); in 3D
-    every rank is given the whole input and the remesh runs on the ranks, with P1 or P1+G, changed_only off."""
+    every rank is given the whole input and the remesh runs on the ranks, with P1 or P1+G and changed_only as on one
+    process (ShapeForest's M4: the rounds start around the change)."""
 
     patches: list = field(default_factory=list)
     h: float = 0.07
@@ -188,7 +190,7 @@ class ShapeForestRemesher:
 
     def conform(self, X: np.ndarray, T: np.ndarray, values: np.ndarray, comm=None):
         """conform on (X, T) with phi's vertex values: the result and its report. ``comm`` (3D): the whole input on
-        every rank, the remesh on the ranks (volume.conform(comm=)), changed_only off (one process only so far)."""
+        every rank, the remesh on the ranks (volume.conform(comm=))."""
         d = X.shape[1]
         L = self.source(X, T, values)
         T32 = np.ascontiguousarray(T, np.int32)
@@ -197,7 +199,7 @@ class ShapeForestRemesher:
             if d != 3:
                 raise ValueError("ShapeForestRemesher.conform(comm=): 3D only (2D on ranks conforms each rank's own "
                                  "cells: level_set)")
-            kw.update(comm=sm.mpi.comm(comm), rounds=int(self.rounds), changed_only=False)
+            kw.update(comm=sm.mpi.comm(comm), rounds=int(self.rounds))
         if d == 3:
             # the rule's floor and conform's tuning knobs go through options; planar's floor is fixed (2 h_min) and its
             # knobs are keywords
@@ -275,13 +277,10 @@ class ShapeForestRemesher:
         return RemeshedLevelSet(new, new_phi, new_cells, new_facets)
 
     def _level_set_ranks_3d(self, msh, phi, params: Parameters, name) -> RemeshedLevelSet:
-        """On MPI ranks in 3D (ShapeForest's docs/conform_mpi_plan.md section 29, M2a): the whole mesh and phi gathered
-        on every rank (``gather_whole``), the cut and the correction there, the remesh on the ranks
-        (``volume.conform(comm=)``, changed_only off); the result one DOLFINx mesh that dolfinx distributes from rank 0
-        (``to_dolfinx_from_whole``)."""
-        if self.changed_only and not self.calls and msh.comm.rank == 0:
-            print("  ShapeForestRemesher: changed_only is off on MPI ranks in 3D (ShapeForest's M4 is not there yet)",
-                  flush=True)
+        """On MPI ranks in 3D (ShapeForest's docs/conform_mpi_plan.md sections 29 and 30, M2a and M4): the whole mesh and
+        phi gathered on every rank (``gather_whole``), the cut and the correction there, the remesh on the ranks
+        (``volume.conform(comm=)``; changed_only: its rounds start around the change); the result one DOLFINx mesh that
+        dolfinx distributes from rank 0 (``to_dolfinx_from_whole``)."""
         t0 = time.perf_counter()
         X, T, values = gather_whole(msh, phi)
         try:

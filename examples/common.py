@@ -77,7 +77,7 @@ def _parser(
         "--sf-changed-only",
         choices=("on", "off"),
         default=None,
-        help="ShapeForest: remesh only around the change (on) or everywhere (off; on MPI ranks in 3D it is off).",
+        help="ShapeForest: remesh only around the change (on) or everywhere (off).",
     )
     parser.add_argument(
         "--sf-rounds",
