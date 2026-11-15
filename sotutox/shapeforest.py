@@ -13,9 +13,9 @@ wall with none inside has no sign and opens at the next step (mmg's FEM mode doe
 no_cross_edges the 3D cantilever at h 0.07 reached mmg3d's design (J 0.170 at iteration 60).
 
 On MPI ranks the loop starts from its initial mesh (``start="initial"``). In 2D each rank conforms its own cells (P1); in
-3D too for P1 (ShapeForest's M2b: the cut on each rank's own cells, the remesh from the parts), and for P1+G with
-``parts=True`` (G assembled on the ranks); otherwise every rank is given the whole mesh and phi, and with changed_only
-the remesh's rounds start around the change.
+3D too, with P1 and P1+G (ShapeForest's M2b: the cut on each rank's own cells, the remesh from the parts; for P1+G, G
+assembled on the ranks). With changed_only or ``parts=False`` every rank is given the whole mesh and phi, and with
+changed_only the remesh's rounds start around the change.
 
 ShapeForest is optional: importing this module raises ImportError when it is not installed. Its compiled mesher
 (``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later; 3D on MPI ranks ``meshing/volume-ranks`` from M2b,
@@ -150,13 +150,12 @@ class ShapeForestRemesher:
     ``"mmg"`` (sotutox's mmg remesh of the initial mesh, as the mmg loop starts) or ``"initial"`` (the initial mesh as it is:
     no mmg anywhere). ``rounds``: on MPI ranks in 3D, the remesh's rounds (``volume.conform(rounds=)``: each round moves
     the parts' borders). ``parts``: on MPI ranks in 3D without changed_only, the cut on each rank's own cells
-    (ShapeForest's M2b; True) or the whole input on every rank (False); None: P1 on the parts, P1+G whole (on 2 ranks
-    the P1+G cut on the parts took 1.8 times the whole cut's time, the call 1.1 times, 15 November). ``options``:
+    (ShapeForest's M2b; True, the default, with P1 and P1+G) or the whole input on every rank (False). ``options``:
     conform's ``options``. ``failures``: a folder that keeps the input of every failed call.
 
     On MPI ranks (``msh.comm.size > 1``): ``start="initial"``. In 2D each rank conforms its own cells (P1 only); in 3D
-    every rank is given the whole input and the remesh runs on the ranks, with P1 or P1+G and changed_only as on one
-    process (ShapeForest's M4: the rounds start around the change)."""
+    too (``parts``), and with changed_only or ``parts=False`` every rank is given the whole input, with changed_only as
+    on one process (ShapeForest's M4: the rounds start around the change)."""
 
     patches: list = field(default_factory=list)
     h: float = 0.07
@@ -172,7 +171,7 @@ class ShapeForestRemesher:
     cross_floor: float | None = 0.5
     start: str = "mmg"
     rounds: int = 4
-    parts: bool | None = None
+    parts: bool = True
     options: dict = field(default_factory=dict)
     failures: Path | None = None
     calls: list = field(default_factory=list)   # per call: name, seconds, cells, ok
@@ -272,13 +271,13 @@ class ShapeForestRemesher:
         """On MPI ranks: each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
         ``from_fem(gather=False)``), conform on the ranks with nothing gathered (2D; 3D: ``volume.conform`` with
         ``parts``, ShapeForest's M2b), and the parts made one DOLFINx mesh (``sm.fem.to_dolfinx``) with sotutox's
-        references. In 3D P1+G with ``parts=True`` goes the same way with G assembled on the ranks
+        references. In 3D P1+G goes the same way (``parts``, the default) with G assembled on the ranks
         (``lumped_gradient_fem``): ShapeForest gathers the Hermite level set and cuts it on the parts, and its correction
         runs on the gathered volume, which dolfinx distributes from rank 0 (``to_dolfinx_from_whole``) until
-        ShapeForest's M5. Otherwise P1+G, ``parts=False`` and changed_only take the whole input on every rank
+        ShapeForest's M5. ``parts=False`` and changed_only take the whole input on every rank
         (``_level_set_ranks_3d``)."""
         d = msh.topology.dim
-        parts = self.representation == "p1" if self.parts is None else bool(self.parts)
+        parts = bool(self.parts)
         if d == 3 and (self.changed_only or not parts):
             return self._level_set_ranks_3d(msh, phi, params, name)
         if self.representation != "p1" and d != 3:

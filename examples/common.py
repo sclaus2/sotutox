@@ -83,8 +83,8 @@ def _parser(
         "--sf-parts",
         choices=("on", "off"),
         default=None,
-        help="ShapeForest, 3D on MPI ranks without changed_only: the cut on each rank's own cells (on) or the whole input "
-        "on every rank (off); by default P1 on the parts, P1+G whole.",
+        help="ShapeForest, 3D on MPI ranks without changed_only: the cut on each rank's own cells (on, the default) or the "
+        "whole input on every rank (off).",
     )
     parser.add_argument(
         "--sf-rounds",
