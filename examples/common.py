@@ -80,6 +80,13 @@ def _parser(
         help="ShapeForest: remesh only around the change (on) or everywhere (off).",
     )
     parser.add_argument(
+        "--sf-parts",
+        choices=("on", "off"),
+        default=None,
+        help="ShapeForest, 3D on MPI ranks without changed_only: the cut on each rank's own cells (on) or the whole input "
+        "on every rank (off); by default P1 on the parts, P1+G whole.",
+    )
+    parser.add_argument(
         "--sf-rounds",
         type=int,
         default=None,
@@ -179,6 +186,8 @@ def _shapeforest_remesher(args, params: Parameters, settings: Callable[[Paramete
             kw[key] = getattr(args, option)
     if args.sf_changed_only is not None:
         kw["changed_only"] = args.sf_changed_only == "on"
+    if args.sf_parts is not None:
+        kw["parts"] = args.sf_parts == "on"
     if args.sf_h is not None and args.sf_tol is None:
         kw["tol"] = 0.25 * args.sf_h
     kw.setdefault("failures", args.output_dir / "failures")

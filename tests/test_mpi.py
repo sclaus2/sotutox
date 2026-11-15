@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later
 """The loop on MPI ranks with ShapeForest's remesher, through mpiexec on 1 and 2 ranks:
 - 2D: the cantilever, three iterations (each rank conforms its own cells);
-- 3D: the cantilever at h 0.12, two iterations (every rank is given the whole input, the remesh runs on the ranks),
-  with changed_only off on both, and on (on ranks the rounds start around the change: ShapeForest's M4);
+- 3D: the cantilever at h 0.12, two iterations, P1+G with changed_only off (every rank is given the whole input:
+  ShapeForest's M2a), and on (on ranks the rounds start around the change: ShapeForest's M4);
+- 3D, P1+G with ``--sf-parts on``: every rank cuts its own cells, the Hermite level set gathered, the remesh from the
+  parts, the correction on the gathered volume (ShapeForest's M2b);
 - 3D with P1: every rank cuts its own cells and the remesh starts from the parts (ShapeForest's M2b).
 Both runs finish, write one history (rank 0), and follow each other: a mesh on ranks is a different mesh, so J agrees
 to a few parts in a thousand, not bit for bit.
@@ -69,6 +71,16 @@ def test_the_3d_loop_runs_on_two_ranks_and_follows_one(tmp_path):
         assert abs(float(a["compliance"]) - float(b["compliance"])) < 1e-2 * float(a["compliance"])
         assert abs(float(a["volume"]) - float(b["volume"])) < 2e-3 * float(a["volume"])
     assert float(two[-1]["volume"]) < float(two[0]["volume"])
+
+
+def test_the_3d_p1g_loop_cuts_on_parts_on_two_ranks_and_follows_one(tmp_path):
+    options = ("--sf-h", "0.12", "--sf-h-min", "0.06", "--sf-changed-only", "off", "--sf-parts", "on")
+    one = _run(1, tmp_path / "one", "cantilever_3d.py", options, iterations=2)
+    two = _run(2, tmp_path / "two", "cantilever_3d.py", options, iterations=2)
+    assert len(one) >= 2 and len(two) >= 2
+    for a, b in zip(one, two):
+        assert abs(float(a["compliance"]) - float(b["compliance"])) < 1e-2 * float(a["compliance"])
+        assert abs(float(a["volume"]) - float(b["volume"])) < 2e-3 * float(a["volume"])
 
 
 def test_the_3d_loop_with_changed_only_runs_on_two_ranks_and_follows_one(tmp_path):

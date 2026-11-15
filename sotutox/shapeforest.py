@@ -13,12 +13,13 @@ wall with none inside has no sign and opens at the next step (mmg's FEM mode doe
 no_cross_edges the 3D cantilever at h 0.07 reached mmg3d's design (J 0.170 at iteration 60).
 
 On MPI ranks the loop starts from its initial mesh (``start="initial"``). In 2D each rank conforms its own cells (P1); in
-3D every rank is given the whole mesh and phi, and the remesh runs on the ranks (P1 or P1+G; changed_only starts its
-rounds around the change).
+3D too for P1 (ShapeForest's M2b: the cut on each rank's own cells, the remesh from the parts), and for P1+G with
+``parts=True`` (G assembled on the ranks); otherwise every rank is given the whole mesh and phi, and with changed_only
+the remesh's rounds start around the change.
 
 ShapeForest is optional: importing this module raises ImportError when it is not installed. Its compiled mesher
-(``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later; 3D on MPI ranks ``meshing/volume-ranks`` from M4,
-ABI 56, an MPI build) must match its Python package.
+(``shapeforest._sf_mesher``, branch ``meshing/pass-rework`` or later; 3D on MPI ranks ``meshing/volume-ranks`` from M2b,
+ABI 57, an MPI build) must match its Python package.
 """
 
 from __future__ import annotations
@@ -77,6 +78,25 @@ def lumped_gradient(X: np.ndarray, T: np.ndarray, f: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(num / den[:, None])
 
 
+def lumped_gradient_fem(phi) -> fem.Function:
+    """:func:`lumped_gradient` on phi's mesh on any number of ranks: the lumped L2 projection of grad(phi) as a P1 vector
+    function, assembled (per vertex the cells' gradients weighted by their measure), its ghost values up to date."""
+    from dolfinx import la
+    msh = phi.function_space.mesh
+    d = msh.topology.dim
+    W = fem.functionspace(msh, ("Lagrange", 1, (d,)))
+    S = fem.functionspace(msh, ("Lagrange", 1))
+    num = fem.assemble_vector(fem.form(ufl.inner(ufl.grad(phi), ufl.TestFunction(W)) * ufl.dx))
+    den = fem.assemble_vector(fem.form(ufl.TestFunction(S) * ufl.dx))
+    num.scatter_reverse(la.InsertMode.add)
+    den.scatter_reverse(la.InsertMode.add)
+    g = fem.Function(W, name="G")
+    n = W.dofmap.index_map.size_local
+    g.x.array[:n * d] = num.array[:n * d] / np.repeat(den.array[:n], d)
+    g.x.scatter_forward()
+    return g
+
+
 def to_dolfinx(out, params: Parameters, patch_refs: list[int], d: int) -> tuple[mesh.Mesh, mesh.MeshTags, mesh.MeshTags]:
     """A conform result (dimension d) as a DOLFINx mesh with sotutox's references: material 0 (phi < 0) solid, else void;
     the outer facets of patch k ``patch_refs[k]`` (the others 0); the interface ``params.ref_interface``."""
@@ -129,8 +149,10 @@ class ShapeForestRemesher:
     ``no_cross_edges`` and ``cross_floor`` (x h_min; 3D only, 2D's floor is 2 h_min): the rule above. ``start``: the first mesh, which phi0 is sampled on --
     ``"mmg"`` (sotutox's mmg remesh of the initial mesh, as the mmg loop starts) or ``"initial"`` (the initial mesh as it is:
     no mmg anywhere). ``rounds``: on MPI ranks in 3D, the remesh's rounds (``volume.conform(rounds=)``: each round moves
-    the parts' borders). ``options``: conform's ``options``. ``failures``: a folder that keeps the input of every failed
-    call.
+    the parts' borders). ``parts``: on MPI ranks in 3D without changed_only, the cut on each rank's own cells
+    (ShapeForest's M2b; True) or the whole input on every rank (False); None: P1 on the parts, P1+G whole (on 2 ranks
+    the P1+G cut on the parts took 1.8 times the whole cut's time, the call 1.1 times, 15 November). ``options``:
+    conform's ``options``. ``failures``: a folder that keeps the input of every failed call.
 
     On MPI ranks (``msh.comm.size > 1``): ``start="initial"``. In 2D each rank conforms its own cells (P1 only); in 3D
     every rank is given the whole input and the remesh runs on the ranks, with P1 or P1+G and changed_only as on one
@@ -150,6 +172,7 @@ class ShapeForestRemesher:
     cross_floor: float | None = 0.5
     start: str = "mmg"
     rounds: int = 4
+    parts: bool | None = None
     options: dict = field(default_factory=dict)
     failures: Path | None = None
     calls: list = field(default_factory=list)   # per call: name, seconds, cells, ok
@@ -249,33 +272,46 @@ class ShapeForestRemesher:
         """On MPI ranks: each rank's own cells and phi's P1 values on them (``sm.sources.dolfinx_mesh``,
         ``from_fem(gather=False)``), conform on the ranks with nothing gathered (2D; 3D: ``volume.conform`` with
         ``parts``, ShapeForest's M2b), and the parts made one DOLFINx mesh (``sm.fem.to_dolfinx``) with sotutox's
-        references. In 3D, P1+G and changed_only take the whole input on every rank (``_level_set_ranks_3d``): the cut
-        on parts is P1 so far, without changed_only."""
+        references. In 3D P1+G with ``parts=True`` goes the same way with G assembled on the ranks
+        (``lumped_gradient_fem``): ShapeForest gathers the Hermite level set and cuts it on the parts, and its correction
+        runs on the gathered volume, which dolfinx distributes from rank 0 (``to_dolfinx_from_whole``) until
+        ShapeForest's M5. Otherwise P1+G, ``parts=False`` and changed_only take the whole input on every rank
+        (``_level_set_ranks_3d``)."""
         d = msh.topology.dim
-        if d == 3 and (self.representation != "p1" or self.changed_only):
+        parts = self.representation == "p1" if self.parts is None else bool(self.parts)
+        if d == 3 and (self.changed_only or not parts):
             return self._level_set_ranks_3d(msh, phi, params, name)
-        if self.representation != "p1":
-            raise ValueError("ShapeForestRemesher on MPI ranks: representation='p1' (conform on ranks reads no "
+        if self.representation != "p1" and d != 3:
+            raise ValueError("ShapeForestRemesher on MPI ranks in 2D: representation='p1' (conform on ranks reads no "
                              "derivatives); valid: 'p1'")
         t0 = time.perf_counter()
         try:
             part = sm.sources.dolfinx_mesh(msh)
-            L = sm.sources.from_fem(phi, gather=False, dtype="float64")
+            if self.representation == "p1g":
+                L = sm.sources.from_fem(phi, gather=False, dtype="float64", gradient=lumped_gradient_fem(phi),
+                                        between="hermite")
+            else:
+                L = sm.sources.from_fem(phi, gather=False, dtype="float64")
             kw = self._kw()
             c = sm.mpi.comm(msh.comm)
+            whole = d == 3 and self.representation == "p1g"   # the correction on the gathered volume (until M5)
             if d == 3:
                 options = dict(self.options)
                 if self.no_cross_edges and self.cross_floor is not None:
                     options.setdefault("cross_floor", float(self.cross_floor))
                 if options:
                     kw["options"] = options
-                mine, report = sm.volume.conform(part, None, L, comm=c, parts=True, gather=False,
+                mine, report = sm.volume.conform(part, None, L, comm=c, parts=True, gather=whole,
                                                  rounds=int(self.rounds), **kw)
             else:
                 kw.update(self.options)
                 mine, report = sm.planar.conform(part, None, L, comm=c, gather=False, **kw)
-            out = sm.fem.to_dolfinx(mine, msh.comm)
-            new, new_cells, new_facets = _tags_on_ranks(out, params, [ref for _, ref in self.patches])
+            if whole:
+                new, new_cells, new_facets = to_dolfinx_from_whole(mine, params, [ref for _, ref in self.patches],
+                                                                   msh.comm)
+            else:
+                out = sm.fem.to_dolfinx(mine, msh.comm)
+                new, new_cells, new_facets = _tags_on_ranks(out, params, [ref for _, ref in self.patches])
         except (sm.MeshingError, ValueError, RuntimeError) as error:
             self.calls.append(dict(name=name, seconds=time.perf_counter() - t0, cells=0, ok=False))
             if msh.comm.rank == 0:
