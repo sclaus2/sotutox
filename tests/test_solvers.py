@@ -69,6 +69,37 @@ def test_3d_elasticity_with_rigid_body_modes_matches_the_direct_solve() -> None:
     np.testing.assert_allclose(amg.x.array, direct.x.array, rtol=0.0, atol=1.0e-6 * scale)
 
 
+def test_3d_p2_elasticity_with_p_multigrid_matches_the_direct_solve_and_gamg(monkeypatch) -> None:
+    msh = _cube()
+    V = fem.functionspace(msh, ("Lagrange", 2, (3,)))
+    u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+    mu, lmbda = 1.0, 1.25
+
+    def sigma(w):
+        eps = ufl.sym(ufl.grad(w))
+        return 2.0 * mu * eps + lmbda * ufl.tr(eps) * ufl.Identity(3)
+
+    clamped = mesh.locate_entities_boundary(msh, 2, lambda p: np.isclose(p[0], 0.0))
+    bc = fem.dirichletbc(np.zeros(3), fem.locate_dofs_topological(V, 2, clamped), V)
+    a = ufl.inner(sigma(u), ufl.sym(ufl.grad(v))) * ufl.dx
+    L = ufl.dot(fem.Constant(msh, np.array([0.0, -1.0, 0.3])), v) * ufl.dx
+    direct = petsc.LinearProblem(a, L, bcs=[bc], petsc_options_prefix="test_p2_lu_",
+                                 petsc_options=solvers.DIRECT).solve()
+    scale = np.abs(direct.x.array).max()
+    iterations = {}
+    for p_multigrid in (True, False):
+        monkeypatch.setattr(solvers, "P_MULTIGRID", p_multigrid)
+        problem = petsc.LinearProblem(a, L, bcs=[bc], petsc_options_prefix=f"test_p2_{p_multigrid}_",
+                                      petsc_options=solvers.options("elasticity", msh))
+        uh = solvers.solve_elasticity(problem, V)
+        assert problem.solver.getPC().getType() == ("python" if p_multigrid else "gamg")
+        assert problem.solver.getConvergedReason() > 0
+        iterations[p_multigrid] = problem.solver.getIterationNumber()
+        np.testing.assert_allclose(uh.x.array, direct.x.array, rtol=0.0, atol=1.0e-6 * scale)
+
+    assert iterations[True] < iterations[False]
+
+
 def test_graph_signed_distance_propagates_from_the_nearest_seed() -> None:
     # crossings at x = 0.5 and x = 3.25 on a path 0-1-2-3-4: the middle vertex is nearer to the right one
     points = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]])
