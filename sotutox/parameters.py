@@ -70,6 +70,11 @@ class Parameters:
     # only), "exact" (to the interface's facets, gathered whole on every MPI rank) or "auto" (graph on one process, exact
     # on ranks)
     redistancing: str = "auto"
+    # the largest constraint step weight alpha_C, in units of the Gauss-Newton step (1 removes the volume error to first
+    # order). None keeps sotuto's alpha_C = constraint_weight * h / max|xi_C|, whose step moves the volume by the same
+    # amount however small the error is, so it overshoots the target every iteration once it is near. 0.9 is the cap
+    # of Feppon's null-space optimizer (nullspace_optimizer's CFL).
+    constraint_cap: float | None = None
 
     @property
     def mesh_size(self) -> float:

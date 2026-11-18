@@ -103,6 +103,8 @@ def compute_descent_with_inner(
         * params.mesh_size
         / (params.eps**2 + norm_xi_constraint)
     )
+    if params.constraint_cap is not None:
+        alpha_constraint = min(alpha_constraint, params.constraint_cap)
 
     speed = _linear_combination(
         V,
